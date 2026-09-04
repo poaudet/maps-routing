@@ -4,6 +4,7 @@
   "description": "Micro-rerouting skill for autonomous agents: corridor validation between intermediate points with user-route bias and a feedback learning loop.",
   "main": "index.js",
   "scripts": {
+    "start": "node src/server.js",
     "test": "node --test"
   },
   "keywords": [
