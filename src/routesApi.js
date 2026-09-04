@@ -67,6 +67,35 @@ function parseDurationSeconds(duration) {
   throw new Error(`Unrecognized duration format: ${JSON.stringify(duration)}`);
 }
 
+/**
+ * Convertit une heure de départ (`Date`, timestamp numérique, ou chaîne
+ * ISO 8601 / RFC 3339) en chaîne RFC 3339 attendue par le champ
+ * `departureTime` de l'API Routes.
+ */
+function toDepartureTimeString(departureTime) {
+  if (departureTime instanceof Date) {
+    if (Number.isNaN(departureTime.getTime())) {
+      throw new Error(`Invalid departureTime: ${JSON.stringify(departureTime)}`);
+    }
+    return departureTime.toISOString();
+  }
+  if (typeof departureTime === 'number') {
+    const date = new Date(departureTime);
+    if (Number.isNaN(date.getTime())) {
+      throw new Error(`Invalid departureTime: ${JSON.stringify(departureTime)}`);
+    }
+    return date.toISOString();
+  }
+  if (typeof departureTime === 'string' && departureTime.trim() !== '') {
+    const date = new Date(departureTime);
+    if (Number.isNaN(date.getTime())) {
+      throw new Error(`Invalid departureTime: ${JSON.stringify(departureTime)}`);
+    }
+    return date.toISOString();
+  }
+  throw new Error(`Invalid departureTime: ${JSON.stringify(departureTime)}`);
+}
+
 /** Normalise une route brute de l'API en option exploitable par l'optimiseur. */
 function normalizeRoute(route, index) {
   const stepAnchors = (route.legs || [])
@@ -94,6 +123,9 @@ function normalizeRoute(route, index) {
  * @param {object} [options]
  * @param {string} [options.apiKey] Clé API Google (défaut : process.env.GOOGLE_MAPS_API_KEY).
  * @param {string} [options.fieldMask] Masque de champ à envoyer (X-Goog-FieldMask).
+ * @param {string|Date} [options.departureTime] Heure de départ souhaitée (ISO 8601 / RFC 3339,
+ *   ou instance `Date`) utilisée par l'API pour estimer le trafic prévu. Uniquement transmise
+ *   à l'API Google (ignorée par le lien Google Maps généré, cf. src/mapsLink.js).
  * @param {typeof fetch} [options.fetchImpl] Implémentation de fetch (injectable pour les tests).
  * @returns {Promise<Array>} Options normalisées (duration, staticDuration, géométrie).
  */
@@ -113,10 +145,15 @@ async function fetchRouteAlternatives(origin, destination, options = {}) {
     computeAlternativeRoutes: true,
   };
 
+  if (options.departureTime !== undefined && options.departureTime !== null) {
+    body.departureTime = toDepartureTimeString(options.departureTime);
+  }
+
   debugLog('google', options, 'Requête computeRoutes', {
     origin,
     destination,
     fieldMask,
+    departureTime: body.departureTime,
   });
 
   const response = await fetchImpl(ROUTES_API_URL, {
@@ -168,6 +205,7 @@ module.exports = {
   FIELD_MASK,
   DEFAULT_CONGESTION_RATIO,
   parseDurationSeconds,
+  toDepartureTimeString,
   normalizeRoute,
   detectHighTraffic,
   fetchRouteAlternatives,

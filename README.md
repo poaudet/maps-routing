@@ -125,6 +125,19 @@ La clé API Google est fournie via l'option `apiKey` ou la variable d'environnem
 `GOOGLE_MAPS_API_KEY`. La tolérance floue se règle avec l'option `toleranceRatio`
 (défaut : `0.05`).
 
+L'option `departureTime` (chaîne ISO 8601 / RFC 3339, timestamp numérique ou
+instance `Date`) permet d'indiquer une heure de départ prévue à l'API Google
+Maps Routes, afin d'obtenir une estimation de trafic pour ce moment précis
+plutôt que pour l'heure courante :
+
+```js
+await planSegment(pointA, pointB, { departureTime: '2024-06-01T14:30:00Z' });
+```
+
+Cette option n'est utilisée que pour la requête à l'API Google (calcul de
+l'itinéraire) ; elle n'est **pas** transmise au lien Google Maps généré
+(`googleMapsUrl`), qui reste ouvert sans heure de départ imposée.
+
 ## Débogage
 
 Le journal de débogage (désactivé par défaut) montre la requête et la réponse
