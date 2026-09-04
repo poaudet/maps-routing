@@ -1,0 +1,359 @@
+openapi: 3.0.3
+info:
+  title: maps-routing API
+  description: >-
+    API REST du skill de micro-reroutage (routing skill) pour agent autonome
+    (framework OpenClaw). Calcule des options de routage entre des points
+    intermédiaires, privilégie les routes connues de l'utilisateur (registre
+    de corridors) et apprend de nouvelles routes via une boucle de
+    rétroaction. Voir README.md pour la description complète de l'architecture.
+  version: "1.0.0"
+  license:
+    name: MIT
+servers:
+  - url: http://localhost:3000
+    description: Serveur local par défaut (variable d'environnement PORT)
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Vérification de l'état du service
+      responses:
+        '200':
+          description: Le service est opérationnel
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                required: [status]
+
+  /corridors:
+    get:
+      operationId: getCorridors
+      summary: Liste les corridors du registre (route-cache.json)
+      responses:
+        '200':
+          description: Registre de corridors
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Registry'
+
+  /plan:
+    post:
+      operationId: postPlan
+      summary: Planifie un segment entre deux points intermédiaires
+      description: >-
+        Interroge l'API Google Maps Routes (et, en cas de trafic élevé, une
+        matrice OSRM) puis applique l'optimiseur avec biais de registre pour
+        recommander une route et proposer des alternatives.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlanRequest'
+      responses:
+        '200':
+          description: Résultat de la planification
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanResult'
+        '400':
+          description: Requête invalide (pointA/pointB manquants ou invalides)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Erreur interne (ex. échec de l'API Google Maps)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /feedback:
+    post:
+      operationId: postFeedback
+      summary: Enregistre un feedback utilisateur (nouvelle route préférée)
+      description: >-
+        Ajoute un nouveau corridor au registre, ou renforce (feedbackCount)
+        un corridor existant correspondant au même segment et au même
+        ancrage.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FeedbackRequest'
+      responses:
+        '200':
+          description: Corridor existant renforcé
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeedbackResult'
+        '201':
+          description: Nouveau corridor créé
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeedbackResult'
+        '400':
+          description: Requête invalide (champs requis manquants)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  schemas:
+    LatLng:
+      type: object
+      properties:
+        lat:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+        lng:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+      required: [lat, lng]
+
+    NamedPoint:
+      type: object
+      properties:
+        name:
+          type: string
+        anchor:
+          $ref: '#/components/schemas/LatLng'
+      required: [name]
+
+    Point:
+      description: >-
+        Point intermédiaire : coordonnées {lat,lng}, nom de lieu (chaîne),
+        ou objet { name } résolu via l'API Geocoding.
+      oneOf:
+        - $ref: '#/components/schemas/LatLng'
+        - $ref: '#/components/schemas/NamedPoint'
+        - type: string
+
+    PlanRequest:
+      type: object
+      properties:
+        pointA:
+          $ref: '#/components/schemas/Point'
+        pointB:
+          $ref: '#/components/schemas/Point'
+        matrixWaypoints:
+          type: array
+          description: Points intermédiaires pour la matrice OSRM (défaut [pointA, pointB]).
+          items:
+            $ref: '#/components/schemas/Point'
+        toleranceRatio:
+          type: number
+          description: Budget de tolérance flou (défaut 0.05).
+          default: 0.05
+        congestionRatio:
+          type: number
+          description: Seuil de trafic élevé (défaut 0.25).
+          default: 0.25
+        anchorToleranceMeters:
+          type: number
+          description: Rayon de correspondance d'un ancrage (mètres).
+        osrmBaseUrl:
+          type: string
+          description: Serveur OSRM ou fournisseur alternatif.
+        geocodeBaseUrl:
+          type: string
+          description: Service de géocodage alternatif.
+        departureTime:
+          type: string
+          description: >-
+            Heure de départ souhaitée (ISO 8601 / RFC 3339) transmise à
+            l'API Google Maps Routes pour estimer le trafic prévu à ce
+            moment. N'affecte pas le lien Google Maps généré (googleMapsUrl).
+          format: date-time
+          example: '2024-06-01T14:30:00Z'
+        debug:
+          type: boolean
+          description: Active le journal de débogage de chaque couche.
+      required: [pointA, pointB]
+
+    Route:
+      type: object
+      properties:
+        source:
+          type: string
+          enum: [google, osrm, registry]
+        index:
+          type: integer
+        description:
+          type: string
+        durationSeconds:
+          type: number
+          nullable: true
+        staticDurationSeconds:
+          type: number
+          nullable: true
+        distanceMeters:
+          type: number
+          nullable: true
+        deltaSeconds:
+          type: number
+        matchedCorridorId:
+          type: string
+          nullable: true
+        googleMapsUrl:
+          type: string
+          nullable: true
+        viaIndex:
+          type: integer
+        gainSeconds:
+          type: number
+
+    PlanResult:
+      type: object
+      properties:
+        recommended:
+          type: object
+          properties:
+            source:
+              type: string
+            description:
+              type: string
+            durationSeconds:
+              type: number
+              nullable: true
+            staticDurationSeconds:
+              type: number
+              nullable: true
+            distanceMeters:
+              type: number
+              nullable: true
+            matchedCorridorId:
+              type: string
+              nullable: true
+            reason:
+              type: string
+            googleMapsUrl:
+              type: string
+              nullable: true
+        alternatives:
+          type: array
+          items:
+            $ref: '#/components/schemas/Route'
+        selected:
+          type: object
+        candidates:
+          type: array
+          items:
+            type: object
+        fastest:
+          type: object
+        matchedCorridor:
+          type: object
+          nullable: true
+        reason:
+          type: string
+        traffic:
+          type: object
+          properties:
+            congested:
+              type: boolean
+            ratio:
+              type: number
+            delaySeconds:
+              type: number
+        osrmAlternatives:
+          type: array
+          nullable: true
+          items:
+            type: object
+        points:
+          type: object
+          properties:
+            pointA:
+              $ref: '#/components/schemas/LatLng'
+            pointB:
+              $ref: '#/components/schemas/LatLng'
+
+    FeedbackRequest:
+      type: object
+      properties:
+        pointA:
+          $ref: '#/components/schemas/NamedPoint'
+        pointB:
+          $ref: '#/components/schemas/NamedPoint'
+        anchor:
+          $ref: '#/components/schemas/LatLng'
+        name:
+          type: string
+      required: [pointA, pointB, anchor]
+
+    FeedbackResult:
+      type: object
+      properties:
+        corridor:
+          $ref: '#/components/schemas/Corridor'
+        created:
+          type: boolean
+        registryPath:
+          type: string
+
+    Corridor:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        class:
+          type: string
+        between:
+          type: object
+          properties:
+            pointA:
+              $ref: '#/components/schemas/NamedPoint'
+            pointB:
+              $ref: '#/components/schemas/NamedPoint'
+        anchor:
+          $ref: '#/components/schemas/LatLng'
+        polylineHint:
+          type: string
+          nullable: true
+        feedbackCount:
+          type: integer
+        lastUsedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    Registry:
+      type: object
+      properties:
+        version:
+          type: integer
+        updatedAt:
+          type: string
+          format: date-time
+        corridors:
+          type: array
+          items:
+            $ref: '#/components/schemas/Corridor'
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]

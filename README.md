@@ -155,6 +155,13 @@ await planSegment(pointA, pointB, { debug: true });
 await planSegment(pointA, pointB, { debug: (line) => logger.debug(line) });
 ```
 
+## API REST
+
+Le serveur HTTP (`src/server.js`, `npm start`) expose `GET /health`,
+`GET /corridors`, `POST /plan` et `POST /feedback`. Le contrat complet de
+cette API (schémas de requête/réponse) est documenté au format OpenAPI 3.0
+dans [`openapi.yaml`](./openapi.yaml).
+
 ## Tests
 
 ```sh
