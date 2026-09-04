@@ -91,6 +91,23 @@ La clé API Google est fournie via l'option `apiKey` ou la variable d'environnem
 `GOOGLE_MAPS_API_KEY`. La tolérance floue se règle avec l'option `toleranceRatio`
 (défaut : `0.05`).
 
+## Débogage
+
+Le journal de débogage (désactivé par défaut) montre la requête et la réponse
+de chaque couche : `[maps-routing:google]`, `[maps-routing:osrm]`,
+`[maps-routing:optimizer]`, `[maps-routing:learning]`, `[maps-routing:planSegment]`.
+
+```sh
+# Activation globale
+MAPS_ROUTING_DEBUG=1 node app.js
+```
+
+```js
+// Ou par appel (une fonction peut recevoir les lignes de journal)
+await planSegment(pointA, pointB, { debug: true });
+await planSegment(pointA, pointB, { debug: (line) => logger.debug(line) });
+```
+
 ## Tests
 
 ```sh

@@ -11,6 +11,8 @@
  * des corridors du registre.
  */
 
+const { debugLog } = require('./debug');
+
 const ROUTES_API_URL = 'https://routes.googleapis.com/directions/v2:computeRoutes';
 
 /**
@@ -111,6 +113,12 @@ async function fetchRouteAlternatives(origin, destination, options = {}) {
     computeAlternativeRoutes: true,
   };
 
+  debugLog('google', options, 'Requête computeRoutes', {
+    origin,
+    destination,
+    fieldMask,
+  });
+
   const response = await fetchImpl(ROUTES_API_URL, {
     method: 'POST',
     headers: {
@@ -123,11 +131,21 @@ async function fetchRouteAlternatives(origin, destination, options = {}) {
 
   if (!response.ok) {
     const details = await response.text().catch(() => '');
+    debugLog('google', options, `Erreur API ${response.status}`, details);
     throw new Error(`Google Maps Routes API error ${response.status}: ${details}`);
   }
 
   const payload = await response.json();
-  return (payload.routes || []).map(normalizeRoute);
+  debugLog('google', options, 'Réponse computeRoutes', payload);
+
+  const routes = (payload.routes || []).map(normalizeRoute);
+  debugLog('google', options, `${routes.length} route(s) normalisée(s)`, routes.map((route) => ({
+    description: route.description,
+    durationSeconds: route.durationSeconds,
+    staticDurationSeconds: route.staticDurationSeconds,
+    distanceMeters: route.distanceMeters,
+  })));
+  return routes;
 }
 
 /**

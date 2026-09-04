@@ -18,6 +18,7 @@ const {
   findCorridorsForSegment,
   anchorsMatch,
 } = require('./registry');
+const { debugLog } = require('./debug');
 
 const REQUIRED_FIELDS = ['pointA', 'pointB', 'anchor'];
 
@@ -92,6 +93,11 @@ function updateRegistry(feedbackData, options = {}) {
       existing.name = feedbackData.name;
     }
     saveRegistry(registry, registryPath);
+    debugLog('learning', options, 'Corridor existant renforcé', {
+      id: existing.id,
+      feedbackCount: existing.feedbackCount,
+      registryPath,
+    });
     return { corridor: existing, created: false, registryPath };
   }
 
@@ -112,6 +118,11 @@ function updateRegistry(feedbackData, options = {}) {
 
   registry.corridors.push(corridor);
   saveRegistry(registry, registryPath);
+  debugLog('learning', options, 'Nouveau corridor enregistré', {
+    id: corridor.id,
+    name: corridor.name,
+    registryPath,
+  });
   return { corridor, created: true, registryPath };
 }
 

@@ -15,6 +15,7 @@ const {
   findCorridorsForSegment,
   anchorsMatch,
 } = require('./registry');
+const { debugLog } = require('./debug');
 
 /** Budget de tolérance flou par défaut : +5 % sur la meilleure durée. */
 const DEFAULT_TOLERANCE_RATIO = 0.05;
@@ -70,29 +71,52 @@ function optimizeSegment(routes, registry, segment, options = {}) {
     anchorToleranceMeters
   );
 
+  debugLog('optimizer', options, 'Évaluation des routes', {
+    toleranceRatio,
+    budgetSeconds: Math.round(budgetSeconds),
+    fastestSeconds: fastest.durationSeconds,
+    viableCandidates: candidates.map((route) => ({
+      description: route.description,
+      durationSeconds: route.durationSeconds,
+    })),
+    segmentCorridors: segmentCorridors.map((corridor) => corridor.id),
+  });
+
   for (const candidate of candidates) {
     const matchedCorridor = segmentCorridors.find((corridor) =>
       optionMatchesCorridor(candidate, corridor, anchorToleranceMeters)
     );
     if (matchedCorridor) {
+      const reason =
+        `Biais registre : "${matchedCorridor.name}" (${matchedCorridor.id}) ` +
+        `est viable dans le budget de tolérance (+${Math.round(toleranceRatio * 100)} %).`;
+      debugLog('optimizer', options, 'Sélection avec biais registre', {
+        selected: candidate.description,
+        matchedCorridor: matchedCorridor.id,
+        reason,
+      });
       return {
         selected: candidate,
         candidates,
         fastest,
         matchedCorridor,
-        reason:
-          `Biais registre : "${matchedCorridor.name}" (${matchedCorridor.id}) ` +
-          `est viable dans le budget de tolérance (+${Math.round(toleranceRatio * 100)} %).`,
+        reason,
       };
     }
   }
 
+  const reason = 'Aucun corridor enregistré viable : sélection de la route la plus rapide.';
+  debugLog('optimizer', options, 'Sélection de la route la plus rapide', {
+    selected: candidates[0].description,
+    durationSeconds: candidates[0].durationSeconds,
+    reason,
+  });
   return {
     selected: candidates[0],
     candidates,
     fastest,
     matchedCorridor: null,
-    reason: 'Aucun corridor enregistré viable : sélection de la route la plus rapide.',
+    reason,
   };
 }
 

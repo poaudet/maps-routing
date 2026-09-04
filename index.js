@@ -15,6 +15,7 @@ const { fetchRouteAlternatives, detectHighTraffic } = require('./src/routesApi')
 const { optimizeSegment } = require('./src/optimizer');
 const { updateRegistry } = require('./src/learning');
 const { fetchAlternativesMatrix, rankMatrixAlternatives } = require('./src/osrm');
+const { debugLog } = require('./src/debug');
 
 /**
  * Évalue un segment entre deux points intermédiaires et retourne l'option
@@ -34,11 +35,16 @@ const { fetchAlternativesMatrix, rankMatrixAlternatives } = require('./src/osrm'
  * @param {Array<{lat: number, lng: number}>} [options.matrixWaypoints] Points
  *   intermédiaires pour la matrice OSRM (défaut : [pointA, pointB]).
  * @param {string} [options.osrmBaseUrl] Serveur OSRM ou fournisseur alternatif.
+ * @param {boolean|function} [options.debug] Active le journal de débogage de
+ *   chaque couche (réponses Google/OSRM, décision de l'optimiseur, registre) ;
+ *   une fonction personnalisée peut recevoir les lignes de journal. Activable
+ *   globalement via la variable d'environnement MAPS_ROUTING_DEBUG.
  * @returns {Promise<{selected: object, candidates: Array, fastest: object,
  *   matchedCorridor: object|null, reason: string, traffic: object,
  *   alternatives: Array|null}>}
  */
 async function planSegment(pointA, pointB, options = {}) {
+  debugLog('planSegment', options, 'Planification du segment', { pointA, pointB });
   const registry = loadRegistry(options.registryPath ?? DEFAULT_REGISTRY_PATH);
   const routes = await fetchRouteAlternatives(pointA, pointB, options);
 
@@ -47,14 +53,22 @@ async function planSegment(pointA, pointB, options = {}) {
     route.durationSeconds < best.durationSeconds ? route : best
   );
   const traffic = detectHighTraffic(fastest, options.congestionRatio);
+  debugLog('planSegment', options, 'Détection de trafic', {
+    description: fastest.description,
+    durationSeconds: fastest.durationSeconds,
+    staticDurationSeconds: fastest.staticDurationSeconds,
+    traffic,
+  });
 
   // Trafic élevé : matrice d'alternatives OSRM, réinjectée dans l'optimiseur.
   let alternatives = null;
   let pool = routes;
   if (traffic.congested) {
     const waypoints = options.matrixWaypoints ?? [pointA, pointB];
+    debugLog('planSegment', options, 'Trafic élevé : requête de la matrice OSRM', { waypoints });
     const matrix = await fetchAlternativesMatrix(waypoints, options);
     alternatives = rankMatrixAlternatives(matrix.durations, {
+      ...options,
       currentDurationSeconds: fastest.durationSeconds,
     });
     pool = routes.concat(
@@ -72,6 +86,11 @@ async function planSegment(pointA, pointB, options = {}) {
   }
 
   const result = optimizeSegment(pool, registry, { pointA, pointB }, options);
+  debugLog('planSegment', options, 'Segment planifié', {
+    selected: result.selected.description,
+    matchedCorridor: result.matchedCorridor?.id ?? null,
+    reason: result.reason,
+  });
   return { ...result, traffic, alternatives };
 }
 

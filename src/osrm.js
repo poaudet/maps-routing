@@ -9,6 +9,8 @@
  * alternatives à réacheminer vers l'optimiseur.
  */
 
+const { debugLog } = require('./debug');
+
 const DEFAULT_OSRM_BASE_URL = 'https://router.project-osrm.org';
 
 /** Normalise une coordonnée {lat, lng} (OSRM attend lng,lat). */
@@ -39,13 +41,17 @@ async function fetchAlternativesMatrix(coordinates, options = {}) {
   const coords = coordinates.map(toOsrmCoordinate).join(';');
   const url = `${baseUrl}/table/v1/driving/${coords}?annotations=duration`;
 
+  debugLog('osrm', options, 'Requête table', { url, waypoints: coordinates });
+
   const response = await fetchImpl(url);
   if (!response.ok) {
     const details = await response.text().catch(() => '');
+    debugLog('osrm', options, `Erreur API ${response.status}`, details);
     throw new Error(`OSRM table API error ${response.status}: ${details}`);
   }
 
   const payload = await response.json();
+  debugLog('osrm', options, 'Réponse table', payload);
   if (payload.code !== 'Ok' || !Array.isArray(payload.durations)) {
     throw new Error(`OSRM table API unexpected response: ${payload.code ?? 'no code'}`);
   }
@@ -83,6 +89,7 @@ function rankMatrixAlternatives(durations, options = {}) {
     options.currentDurationSeconds ?? durations[originIndex]?.[destinationIndex];
 
   if (!Number.isFinite(reference)) {
+    debugLog('osrm', options, 'Aucune durée de référence valide dans la matrice');
     return [];
   }
 
@@ -105,7 +112,9 @@ function rankMatrixAlternatives(durations, options = {}) {
       });
     }
   }
-  return alternatives.sort((a, b) => a.durationSeconds - b.durationSeconds);
+  const ranked = alternatives.sort((a, b) => a.durationSeconds - b.durationSeconds);
+  debugLog('osrm', options, 'Alternatives classées', { referenceSeconds: reference, alternatives: ranked });
+  return ranked;
 }
 
 module.exports = {
