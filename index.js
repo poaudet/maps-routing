@@ -107,6 +107,11 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
     );
   }
 
+  // Lien Google Maps forçant les waypoints d'une option (stepAnchors ou
+  // ancrage de corridor) : garantit que l'itinéraire ouvert par l'utilisateur
+  // reproduit exactement l'option évaluée entre pointA et pointB.
+  const googleMapsUrlFor = (waypoints) => buildGoogleMapsRouteUrl(pointA, pointB, waypoints);
+
   const result = optimizeSegment(pool, registry, { pointA, pointB }, options);
   const matchedCorridorId = result.matchedCorridor?.id ?? null;
 
@@ -156,7 +161,7 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
       // Waypoints forcés vers Google Maps : garantit que l'itinéraire ouvert
       // par l'utilisateur correspond exactement à cette option (et non à un
       // itinéraire recalculé par Google Maps entre pointA et pointB).
-      googleMapsUrl: buildGoogleMapsRouteUrl(pointA, pointB, route.stepAnchors),
+      googleMapsUrl: googleMapsUrlFor(route.stepAnchors),
       ...(route.source === 'osrm'
         ? { viaIndex: route.viaIndex, gainSeconds: route.gainSeconds }
         : {}),
@@ -165,7 +170,7 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
     .concat(
       registryAlternatives.map((alt) => ({
         ...alt,
-        googleMapsUrl: buildGoogleMapsRouteUrl(pointA, pointB, [alt.anchor]),
+        googleMapsUrl: googleMapsUrlFor([alt.anchor]),
       }))
     );
 
@@ -179,7 +184,7 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
     reason: result.reason,
     // Waypoints forcés (stepAnchors de la route sélectionnée) pour que le
     // lien Google Maps reproduise l'itinéraire exact recommandé.
-    googleMapsUrl: buildGoogleMapsRouteUrl(pointA, pointB, result.selected.stepAnchors),
+    googleMapsUrl: googleMapsUrlFor(result.selected.stepAnchors),
   };
 
   debugLog('planSegment', options, 'Segment planifié', {
