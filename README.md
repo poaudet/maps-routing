@@ -36,7 +36,25 @@ congestion (défaut **+25 %**), `planSegment` interroge automatiquement le
 service `table` d'**OSRM** (`src/osrm.js`, ou un autre fournisseur via
 `osrmBaseUrl`) pour obtenir une matrice de durées entre points intermédiaires.
 Les alternatives plus rapides que la route congestionnée sont réinjectées dans
-l'optimiseur (`planSegment` retourne alors `traffic` et `alternatives`).
+l'optimiseur (`planSegment` retourne alors `traffic` et `osrmAlternatives`).
+
+### Réponse JSON : route recommandée et alternatives
+
+`planSegment` retourne une réponse JSON structurée permettant à l'utilisateur
+de choisir entre plusieurs sources d'alternatives :
+
+- **`recommended`** : la route recommandée par l'optimiseur (`source`,
+  `description`, `durationSeconds`, `staticDurationSeconds`, `distanceMeters`,
+  `matchedCorridorId`, `reason`).
+- **`alternatives`** : toutes les autres options, triées par durée —
+  alternatives **Google Maps** (`source: "google"`, avec `deltaSeconds` par
+  rapport à la recommandation), alternatives **OSRM** (`source: "osrm"`, avec
+  `viaIndex` et `gainSeconds`) sur les segments à trafic élevé, et corridors du
+  **registre** (`source: "registry"`, avec `corridorId`) applicables au segment
+  mais non retournés par l'API.
+
+Les champs `selected`, `candidates`, `fastest`, `matchedCorridor`, `reason` et
+`traffic` restent exposés pour compatibilité.
 
 ## Format du registre (`route-cache.json`)
 
@@ -73,9 +91,13 @@ const result = await planSegment(
   { lat: 45.5019, lng: -73.5674 },   // Point B
   { apiKey: process.env.GOOGLE_MAPS_API_KEY }
 );
-console.log(result.selected.description, result.reason);
+console.log(result.recommended.description, result.recommended.reason);
+// L'utilisateur peut choisir parmi toutes les alternatives (Google, OSRM, registre) :
+for (const alt of result.alternatives) {
+  console.log(`[${alt.source}]`, alt.description ?? alt.name, alt.durationSeconds);
+}
 if (result.traffic.congested) {
-  console.log('Trafic élevé détecté, alternatives OSRM :', result.alternatives);
+  console.log('Trafic élevé détecté, alternatives OSRM :', result.osrmAlternatives);
 }
 
 // 2. Boucle de rétroaction : l'utilisateur préfère une nouvelle alternative

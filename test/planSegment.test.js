@@ -88,8 +88,25 @@ test('planSegment selects the registered corridor from a mocked Google response 
   assert.equal(result.matchedCorridor.id, 'corridor-beloeil-home-work');
   assert.match(result.reason, /Biais registre/);
   assert.equal(result.traffic.congested, false); // pas de trafic élevé → pas d'appel OSRM
-  assert.equal(result.alternatives, null);
+  assert.equal(result.osrmAlternatives, null);
   assert.ok(result.selected.stepAnchors.length === 2, 'steps conservés dans la sélection');
+
+  // Réponse JSON : route recommandée + alternatives proposées à l'utilisateur.
+  assert.equal(result.recommended.description, 'Chemin de Beloeil');
+  assert.equal(result.recommended.source, 'google');
+  assert.equal(result.recommended.matchedCorridorId, 'corridor-beloeil-home-work');
+  assert.match(result.recommended.reason, /Biais registre/);
+  assert.equal(result.alternatives.length, 1);
+  assert.deepEqual(result.alternatives[0], {
+    source: 'google',
+    index: 0,
+    description: 'A-40 rapide',
+    durationSeconds: 1500,
+    staticDurationSeconds: 1500,
+    distanceMeters: 32000,
+    deltaSeconds: -50,
+    matchedCorridorId: null,
+  });
 });
 
 test('planSegment detects high traffic and pulls faster alternatives from the OSRM matrix', async () => {
@@ -141,11 +158,41 @@ test('planSegment detects high traffic and pulls faster alternatives from the OS
 
   assert.equal(result.traffic.congested, true);
   assert.equal(result.traffic.delaySeconds, 900);
-  assert.deepEqual(result.alternatives, [{ viaIndex: 2, durationSeconds: 2100, gainSeconds: 300 }]);
+  assert.deepEqual(result.osrmAlternatives, [{ viaIndex: 2, durationSeconds: 2100, gainSeconds: 300 }]);
   assert.equal(result.selected.source, 'osrm'); // l'alternative OSRM bat la route congestionnée
   assert.equal(result.selected.durationSeconds, 2100);
   assert.equal(result.matchedCorridor, null);
   assert.match(result.reason, /plus rapide/);
+
+  // Réponse JSON : l'alternative OSRM est recommandée, la route Google congestionnée
+  // et le corridor du registre restent proposés comme alternatives.
+  assert.equal(result.recommended.source, 'osrm');
+  assert.equal(result.recommended.durationSeconds, 2100);
+  assert.equal(result.recommended.matchedCorridorId, null);
+  assert.deepEqual(result.alternatives, [
+    {
+      source: 'google',
+      index: 0,
+      description: 'A-20 congestionnée',
+      durationSeconds: 2400,
+      staticDurationSeconds: 1500,
+      distanceMeters: 33500,
+      deltaSeconds: 300,
+      matchedCorridorId: null,
+    },
+    {
+      source: 'registry',
+      corridorId: 'corridor-beloeil-home-work',
+      name: 'Beloeil home-to-work route',
+      class: 'preferred',
+      anchor: { lat: 45.5403, lng: -73.4466 },
+      feedbackCount: 3,
+      lastUsedAt: '2026-09-01T12:30:00.000Z',
+      durationSeconds: null,
+      staticDurationSeconds: null,
+      note: 'Corridor enregistré sans route retournée par l\u2019API pour ce segment.',
+    },
+  ]);
 });
 
 test('planSegment skips the OSRM matrix when traffic stays under the congestion threshold', async () => {
@@ -166,7 +213,72 @@ test('planSegment skips the OSRM matrix when traffic stays under the congestion 
   const result = await planSegment(POINT_A, POINT_B, { apiKey: 'demo', fetchImpl, registryPath });
 
   assert.equal(result.traffic.congested, false);
-  assert.equal(result.alternatives, null);
+  assert.equal(result.osrmAlternatives, null);
   assert.equal(calls.length, 1, 'un seul appel réseau (Google) — OSRM non sollicité');
   assert.ok(isGoogleRoutesUrl(calls[0]));
+});
+
+test('planSegment lists every option (Google, OSRM, registry) as alternatives for the user', async () => {
+  const registryPath = tmpRegistryPath();
+  const waypoint = { lat: 45.52, lng: -73.39 };
+
+  const fetchImpl = async (url) => {
+    if (isGoogleRoutesUrl(url)) {
+      // Trafic élevé partout : la route du registre passe par le corridor préféré
+      // (ancrage 45.5403,-73.4466) mais reste congestionnée (+40 %).
+      return {
+        ok: true,
+        json: async () => ({
+          routes: [
+            {
+              description: 'A-20 congestionnée',
+              duration: '2400s',
+              staticDuration: '1500s',
+              distanceMeters: 33500,
+              polyline: { encodedPolyline: 'congested' },
+              legs: [{ steps: [{ endLocation: { latLng: { latitude: 45.6, longitude: -73.5 } } }] }],
+            },
+            {
+              description: 'Chemin de Beloeil congestionné',
+              duration: '2300s',
+              staticDuration: '1600s',
+              distanceMeters: 34000,
+              polyline: { encodedPolyline: 'other' },
+              legs: [{ steps: [{ endLocation: { latLng: { latitude: 45.5403, longitude: -73.4466 } } }] }],
+            },
+          ],
+        }),
+      };
+    }
+    return {
+      ok: true,
+      json: async () => ({
+        code: 'Ok',
+        durations: [
+          [0, 2400, 900],
+          [2200, 0, 1400],
+          [850, 1200, 0],
+        ],
+        sources: [],
+        destinations: [],
+      }),
+    };
+  };
+
+  const result = await planSegment(POINT_A, POINT_B, {
+    apiKey: 'demo',
+    fetchImpl,
+    registryPath,
+    matrixWaypoints: [POINT_A, POINT_B, waypoint],
+  });
+
+  // L'OSRM l'emporte (2100 s), mais l'utilisateur peut choisir parmi toutes les sources.
+  assert.equal(result.recommended.source, 'osrm');
+  assert.deepEqual(
+    result.alternatives.map((alt) => [alt.source, alt.description ?? alt.corridorId, alt.matchedCorridorId ?? null]),
+    [
+      ['google', 'Chemin de Beloeil congestionné', 'corridor-beloeil-home-work'],
+      ['google', 'A-20 congestionnée', null],
+    ]
+  );
 });
