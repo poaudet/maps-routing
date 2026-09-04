@@ -12,6 +12,11 @@ const { detectHighTraffic } = require('../src/routesApi');
 const POINT_A = { lat: 45.5668, lng: -73.2032 };
 const POINT_B = { lat: 45.5019, lng: -73.5674 };
 
+/** Vrai si l'URL appelée est l'API Google Maps Routes (hôte exact). */
+function isGoogleRoutesUrl(url) {
+  return new URL(String(url)).hostname === 'routes.googleapis.com';
+}
+
 function tmpRegistryPath() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-segment-'));
   const registryPath = path.join(dir, 'route-cache.json');
@@ -92,7 +97,7 @@ test('planSegment detects high traffic and pulls faster alternatives from the OS
   const waypoint = { lat: 45.52, lng: -73.39 };
 
   const fetchImpl = async (url) => {
-    if (String(url).includes('routes.googleapis.com')) {
+    if (isGoogleRoutesUrl(url)) {
       // Trafic élevé : duration 2400 s vs staticDuration 1500 s (+60 %).
       return {
         ok: true,
@@ -163,5 +168,5 @@ test('planSegment skips the OSRM matrix when traffic stays under the congestion 
   assert.equal(result.traffic.congested, false);
   assert.equal(result.alternatives, null);
   assert.equal(calls.length, 1, 'un seul appel réseau (Google) — OSRM non sollicité');
-  assert.ok(calls[0].includes('routes.googleapis.com'));
+  assert.ok(isGoogleRoutesUrl(calls[0]));
 });

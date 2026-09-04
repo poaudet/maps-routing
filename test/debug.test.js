@@ -19,9 +19,13 @@ function tmpRegistryPath() {
   return registryPath;
 }
 
+function isGoogleRoutesUrl(url) {
+  return new URL(String(url)).hostname === 'routes.googleapis.com';
+}
+
 function makeFetchImpl() {
   return async (url) => {
-    if (String(url).includes('routes.googleapis.com')) {
+    if (isGoogleRoutesUrl(url)) {
       return {
         ok: true,
         json: async () => ({
