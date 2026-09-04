@@ -15,6 +15,7 @@ const { fetchRouteAlternatives, detectHighTraffic } = require('./src/routesApi')
 const { optimizeSegment, optionMatchesCorridor } = require('./src/optimizer');
 const { updateRegistry } = require('./src/learning');
 const { fetchAlternativesMatrix, rankMatrixAlternatives } = require('./src/osrm');
+const { resolvePlace, resolvePlaces } = require('./src/geocode');
 const { debugLog } = require('./src/debug');
 
 /**
@@ -28,27 +29,39 @@ const { debugLog } = require('./src/debug');
  * pour trouver des alternatives plus rapides et les réinjecte dans
  * l'optimiseur.
  *
- * @param {{lat: number, lng: number}} pointA Point intermédiaire de départ.
- * @param {{lat: number, lng: number}} pointB Point intermédiaire d'arrivée.
+ * @param {{lat: number, lng: number}|{name: string}|string} pointA Point
+ *   intermédiaire de départ : coordonnées {lat, lng} ou nom de lieu
+ *   (« Beloeil », { name: 'Beloeil' }) résolu via l'API Geocoding.
+ * @param {{lat: number, lng: number}|{name: string}|string} pointB Point
+ *   intermédiaire d'arrivée (mêmes formes acceptées que pointA).
  * @param {object} [options]
  * @param {string} [options.apiKey] Clé API Google (défaut : GOOGLE_MAPS_API_KEY).
  * @param {typeof fetch} [options.fetchImpl] fetch injectable (tests).
  * @param {string} [options.registryPath] Chemin du fichier route-cache.json.
  * @param {number} [options.toleranceRatio] Budget de tolérance flou (défaut : 0.05).
  * @param {number} [options.congestionRatio] Seuil de trafic élevé (défaut : 0.25).
- * @param {Array<{lat: number, lng: number}>} [options.matrixWaypoints] Points
- *   intermédiaires pour la matrice OSRM (défaut : [pointA, pointB]).
+ * @param {Array<{lat: number, lng: number}|{name: string}|string>} [options.matrixWaypoints]
+ *   Points intermédiaires pour la matrice OSRM (défaut : [pointA, pointB]) ;
+ *   les noms de lieux y sont aussi résolus.
  * @param {string} [options.osrmBaseUrl] Serveur OSRM ou fournisseur alternatif.
+ * @param {string} [options.geocodeBaseUrl] Service de géocodage alternatif.
  * @param {boolean|function} [options.debug] Active le journal de débogage de
  *   chaque couche (réponses Google/OSRM, décision de l'optimiseur, registre) ;
  *   une fonction personnalisée peut recevoir les lignes de journal. Activable
  *   globalement via la variable d'environnement MAPS_ROUTING_DEBUG.
  * @returns {Promise<{recommended: object, alternatives: Array, selected: object,
  *   candidates: Array, fastest: object, matchedCorridor: object|null,
- *   reason: string, traffic: object, osrmAlternatives: Array|null}>}
+ *   reason: string, traffic: object, osrmAlternatives: Array|null,
+ *   points: {pointA: object, pointB: object}}>}
  */
-async function planSegment(pointA, pointB, options = {}) {
-  debugLog('planSegment', options, 'Planification du segment', { pointA, pointB });
+async function planSegment(pointAInput, pointBInput, options = {}) {
+  debugLog('planSegment', options, 'Planification du segment', { pointA: pointAInput, pointB: pointBInput });
+
+  // Résolution des lieux : coordonnées {lat,lng} inchangées, noms de lieux
+  // résolus en coordonnées via l'API Geocoding (src/geocode.js).
+  const [pointA, pointB] = await resolvePlaces([pointAInput, pointBInput], options);
+  debugLog('planSegment', options, 'Lieux résolus', { pointA, pointB });
+
   const registry = loadRegistry(options.registryPath ?? DEFAULT_REGISTRY_PATH);
   const routes = await fetchRouteAlternatives(pointA, pointB, options);
 
@@ -68,7 +81,9 @@ async function planSegment(pointA, pointB, options = {}) {
   let osrmAlternatives = null;
   let pool = routes.map((route) => ({ ...route, source: route.source ?? 'google' }));
   if (traffic.congested) {
-    const waypoints = options.matrixWaypoints ?? [pointA, pointB];
+    const waypoints = options.matrixWaypoints
+      ? await resolvePlaces(options.matrixWaypoints, options)
+      : [pointA, pointB];
     debugLog('planSegment', options, 'Trafic élevé : requête de la matrice OSRM', { waypoints });
     const matrix = await fetchAlternativesMatrix(waypoints, options);
     osrmAlternatives = rankMatrixAlternatives(matrix.durations, {
@@ -167,6 +182,7 @@ async function planSegment(pointA, pointB, options = {}) {
     alternatives,
     recommended,
     osrmAlternatives,
+    points: { pointA, pointB },
   };
 }
 
@@ -177,4 +193,6 @@ module.exports = {
   routesApi: require('./src/routesApi'),
   optimizer: require('./src/optimizer'),
   osrm: require('./src/osrm'),
+  geocode: require('./src/geocode'),
+  server: require('./src/server'),
 };
