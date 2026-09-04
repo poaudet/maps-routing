@@ -28,6 +28,16 @@ via une boucle de rétroaction.
    utilisateur et l'écrit de façon permanente dans le registre. Un feedback répété
    renforce le corridor existant (`feedbackCount`) au lieu de créer un doublon.
 
+### Détection de trafic et matrice d'alternatives (OSRM)
+
+`detectHighTraffic` compare la durée en temps réel (`duration`) au temps en
+conditions fluides (`staticDuration`, free-flow) : au-delà d'un seuil de
+congestion (défaut **+25 %**), `planSegment` interroge automatiquement le
+service `table` d'**OSRM** (`src/osrm.js`, ou un autre fournisseur via
+`osrmBaseUrl`) pour obtenir une matrice de durées entre points intermédiaires.
+Les alternatives plus rapides que la route congestionnée sont réinjectées dans
+l'optimiseur (`planSegment` retourne alors `traffic` et `alternatives`).
+
 ## Format du registre (`route-cache.json`)
 
 ```json
@@ -64,6 +74,9 @@ const result = await planSegment(
   { apiKey: process.env.GOOGLE_MAPS_API_KEY }
 );
 console.log(result.selected.description, result.reason);
+if (result.traffic.congested) {
+  console.log('Trafic élevé détecté, alternatives OSRM :', result.alternatives);
+}
 
 // 2. Boucle de rétroaction : l'utilisateur préfère une nouvelle alternative
 updateRegistry({
