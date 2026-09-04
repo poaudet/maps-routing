@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "updatedAt": "2026-09-04T00:00:00.000Z",
+  "corridors": [
+    {
+      "id": "corridor-beloil-home-work",
+      "name": "Beloeil home-to-work route",
+      "class": "preferred",
+      "between": {
+        "pointA": {
+          "name": "Beloeil",
+          "anchor": { "lat": 45.5668, "lng": -73.2032 }
+        },
+        "pointB": {
+          "name": "Montreal Downtown",
+          "anchor": { "lat": 45.5019, "lng": -73.5674 }
+        }
+      },
+      "anchor": { "lat": 45.5403, "lng": -73.4466 },
+      "polylineHint": "_p~iF~ps|U_ulLnnqC_mqNvxq`@",
+      "feedbackCount": 3,
+      "lastUsedAt": "2026-09-01T12:30:00.000Z"
+    }
+  ]
+}
