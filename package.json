@@ -1,0 +1,20 @@
+{
+  "name": "maps-routing",
+  "version": "1.0.0",
+  "description": "Micro-rerouting skill for autonomous agents: corridor validation between intermediate points with user-route bias and a feedback learning loop.",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": [
+    "routing",
+    "google-maps",
+    "openclaw",
+    "corridor",
+    "agent"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}
