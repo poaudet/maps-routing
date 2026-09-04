@@ -11,6 +11,7 @@
  */
 
 const {
+  DEFAULT_REGISTRY_PATH,
   DEFAULT_ANCHOR_TOLERANCE_METERS,
   loadRegistry,
   saveRegistry,
@@ -68,7 +69,7 @@ function normalizePoint(point) {
 function updateRegistry(feedbackData, options = {}) {
   validateFeedback(feedbackData);
 
-  const registryPath = options.registryPath;
+  const registryPath = options.registryPath ?? DEFAULT_REGISTRY_PATH;
   const anchorToleranceMeters = options.anchorToleranceMeters ?? DEFAULT_ANCHOR_TOLERANCE_METERS;
   const now = options.now ?? new Date();
 

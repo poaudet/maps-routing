@@ -13,7 +13,7 @@ function makeRegistry() {
   return {
     corridors: [
       {
-        id: 'corridor-beloil',
+        id: 'corridor-beloeil',
         name: 'Beloeil home-to-work route',
         class: 'preferred',
         between: {
@@ -51,7 +51,7 @@ function makeRoutes() {
 test('selects the registered corridor when it is viable within the fuzzy tolerance', () => {
   const result = optimizeSegment(makeRoutes(), makeRegistry(), SEGMENT);
   assert.equal(result.selected.index, 1);
-  assert.equal(result.matchedCorridor.id, 'corridor-beloil');
+  assert.equal(result.matchedCorridor.id, 'corridor-beloeil');
   assert.match(result.reason, /Biais registre/);
 });
 
@@ -77,7 +77,7 @@ test('matches a corridor via geometry (step anchors) when the polyline differs',
   routes[1].polyline = 'some-other-polyline';
   const result = optimizeSegment(routes, makeRegistry(), SEGMENT);
   assert.equal(result.selected.index, 1);
-  assert.equal(result.matchedCorridor.id, 'corridor-beloil');
+  assert.equal(result.matchedCorridor.id, 'corridor-beloeil');
 });
 
 test('matches a corridor via anchor alone when the route has no steps nearby', () => {

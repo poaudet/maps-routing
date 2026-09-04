@@ -36,7 +36,7 @@ via une boucle de rétroaction.
   "updatedAt": "2026-09-04T00:00:00.000Z",
   "corridors": [
     {
-      "id": "corridor-beloil-home-work",
+      "id": "corridor-beloeil-home-work",
       "name": "Beloeil home-to-work route",
       "class": "preferred",
       "between": {

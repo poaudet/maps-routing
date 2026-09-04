@@ -24,14 +24,13 @@ const FIELD_MASK = [
   'routes.description',
   'routes.polyline.encodedPolyline',
   'routes.legs.steps.endLocation',
-  'routes.legs.steps.navigationInstruction',
 ].join(',');
 
 function toLatLngLiteral(point) {
   if (
     !point ||
-    typeof point.lat !== 'number' ||
-    typeof point.lng !== 'number' ||
+    !Number.isFinite(point.lat) ||
+    !Number.isFinite(point.lng) ||
     point.lat < -90 ||
     point.lat > 90 ||
     point.lng < -180 ||
@@ -48,6 +47,9 @@ function toLatLngLiteral(point) {
     },
   };
 }
+
+/** Seuil de congestion par défaut : +25 % entre durée réelle et durée free-flow. */
+const DEFAULT_CONGESTION_RATIO = 0.25;
 
 /** Convertit une durée au format protobuf ("1234s" ou secondes numériques) en secondes. */
 function parseDurationSeconds(duration) {
@@ -128,10 +130,27 @@ async function fetchRouteAlternatives(origin, destination, options = {}) {
   return (payload.routes || []).map(normalizeRoute);
 }
 
+/**
+ * Détecte un trafic élevé sur une option normalisée en comparant la durée en
+ * temps réel (`durationSeconds`) au temps en conditions fluides
+ * (`staticDurationSeconds`, free-flow).
+ *
+ * @param {object} route Option normalisée par normalizeRoute.
+ * @param {number} [congestionRatio] Seuil de dépassement (0.25 = +25 %).
+ * @returns {{ congested: boolean, ratio: number, delaySeconds: number }}
+ */
+function detectHighTraffic(route, congestionRatio = DEFAULT_CONGESTION_RATIO) {
+  const delaySeconds = route.durationSeconds - route.staticDurationSeconds;
+  const ratio = route.staticDurationSeconds > 0 ? delaySeconds / route.staticDurationSeconds : 0;
+  return { congested: ratio > congestionRatio, ratio, delaySeconds };
+}
+
 module.exports = {
   ROUTES_API_URL,
   FIELD_MASK,
+  DEFAULT_CONGESTION_RATIO,
   parseDurationSeconds,
   normalizeRoute,
+  detectHighTraffic,
   fetchRouteAlternatives,
 };
