@@ -10,19 +10,23 @@
  *  4. Apprentissage : boucle de rétroaction (src/learning.js)
  */
 
-const { loadRegistry, DEFAULT_REGISTRY_PATH } = require('./src/registry');
+const { loadRegistry, DEFAULT_REGISTRY_PATH, findCorridorsForSegment } = require('./src/registry');
 const { fetchRouteAlternatives, detectHighTraffic } = require('./src/routesApi');
-const { optimizeSegment } = require('./src/optimizer');
+const { optimizeSegment, optionMatchesCorridor } = require('./src/optimizer');
 const { updateRegistry } = require('./src/learning');
 const { fetchAlternativesMatrix, rankMatrixAlternatives } = require('./src/osrm');
 const { debugLog } = require('./src/debug');
 
 /**
- * Évalue un segment entre deux points intermédiaires et retourne l'option
- * privilégiant les corridors connus de l'utilisateur. Si le trafic détecté
- * dépasse le seuil de congestion (duration vs staticDuration free-flow),
- * interroge la matrice OSRM (ou autre fournisseur) pour trouver des
- * alternatives plus rapides et les réinjecte dans l'optimiseur.
+ * Évalue un segment entre deux points intermédiaires et retourne une réponse
+ * JSON structurée : la route recommandée (`recommended`, privilégiant les
+ * corridors connus de l'utilisateur) et la liste des `alternatives` entre
+ * lesquelles l'utilisateur peut choisir — alternatives de Google Maps,
+ * alternatives OSRM (segments à trafic élevé) et corridors du registre.
+ * Si le trafic détecté dépasse le seuil de congestion (duration vs
+ * staticDuration free-flow), interroge la matrice OSRM (ou autre fournisseur)
+ * pour trouver des alternatives plus rapides et les réinjecte dans
+ * l'optimiseur.
  *
  * @param {{lat: number, lng: number}} pointA Point intermédiaire de départ.
  * @param {{lat: number, lng: number}} pointB Point intermédiaire d'arrivée.
@@ -39,9 +43,9 @@ const { debugLog } = require('./src/debug');
  *   chaque couche (réponses Google/OSRM, décision de l'optimiseur, registre) ;
  *   une fonction personnalisée peut recevoir les lignes de journal. Activable
  *   globalement via la variable d'environnement MAPS_ROUTING_DEBUG.
- * @returns {Promise<{selected: object, candidates: Array, fastest: object,
- *   matchedCorridor: object|null, reason: string, traffic: object,
- *   alternatives: Array|null}>}
+ * @returns {Promise<{recommended: object, alternatives: Array, selected: object,
+ *   candidates: Array, fastest: object, matchedCorridor: object|null,
+ *   reason: string, traffic: object, osrmAlternatives: Array|null}>}
  */
 async function planSegment(pointA, pointB, options = {}) {
   debugLog('planSegment', options, 'Planification du segment', { pointA, pointB });
@@ -61,18 +65,18 @@ async function planSegment(pointA, pointB, options = {}) {
   });
 
   // Trafic élevé : matrice d'alternatives OSRM, réinjectée dans l'optimiseur.
-  let alternatives = null;
-  let pool = routes;
+  let osrmAlternatives = null;
+  let pool = routes.map((route) => ({ ...route, source: route.source ?? 'google' }));
   if (traffic.congested) {
     const waypoints = options.matrixWaypoints ?? [pointA, pointB];
     debugLog('planSegment', options, 'Trafic élevé : requête de la matrice OSRM', { waypoints });
     const matrix = await fetchAlternativesMatrix(waypoints, options);
-    alternatives = rankMatrixAlternatives(matrix.durations, {
+    osrmAlternatives = rankMatrixAlternatives(matrix.durations, {
       ...options,
       currentDurationSeconds: fastest.durationSeconds,
     });
-    pool = routes.concat(
-      alternatives.map((alt) => ({
+    pool = pool.concat(
+      osrmAlternatives.map((alt) => ({
         index: routes.length + alt.viaIndex,
         description: `OSRM alternative via waypoint ${alt.viaIndex}`,
         durationSeconds: alt.durationSeconds,
@@ -81,17 +85,89 @@ async function planSegment(pointA, pointB, options = {}) {
         polyline: null,
         stepAnchors: [waypoints[alt.viaIndex]].filter(Boolean),
         source: 'osrm',
+        viaIndex: alt.viaIndex,
+        gainSeconds: alt.gainSeconds,
       }))
     );
   }
 
   const result = optimizeSegment(pool, registry, { pointA, pointB }, options);
+  const matchedCorridorId = result.matchedCorridor?.id ?? null;
+
+  const segmentCorridors = findCorridorsForSegment(
+    registry,
+    pointA,
+    pointB,
+    options.anchorToleranceMeters
+  );
+  const matchedCorridorIds = new Set(
+    pool.flatMap((route) =>
+      segmentCorridors
+        .filter((corridor) => optionMatchesCorridor(route, corridor, options.anchorToleranceMeters))
+        .map((corridor) => corridor.id)
+    )
+  );
+  // Corridors du registre non retournés par l'API : proposés comme alternatives.
+  const registryAlternatives = segmentCorridors
+    .filter((corridor) => !matchedCorridorIds.has(corridor.id))
+    .map((corridor) => ({
+      source: 'registry',
+      corridorId: corridor.id,
+      name: corridor.name,
+      class: corridor.class,
+      anchor: corridor.anchor,
+      feedbackCount: corridor.feedbackCount ?? null,
+      lastUsedAt: corridor.lastUsedAt ?? null,
+      durationSeconds: null,
+      staticDurationSeconds: null,
+      note: 'Corridor enregistré sans route retournée par l\u2019API pour ce segment.',
+    }));
+
+  const alternatives = pool
+    .filter((route) => route !== result.selected)
+    .map((route) => ({
+      source: route.source,
+      index: route.index,
+      description: route.description,
+      durationSeconds: route.durationSeconds,
+      staticDurationSeconds: route.staticDurationSeconds,
+      distanceMeters: route.distanceMeters ?? null,
+      deltaSeconds: route.durationSeconds - result.selected.durationSeconds,
+      matchedCorridorId:
+        segmentCorridors.find((corridor) =>
+          optionMatchesCorridor(route, corridor, options.anchorToleranceMeters)
+        )?.id ?? null,
+      ...(route.source === 'osrm'
+        ? { viaIndex: route.viaIndex, gainSeconds: route.gainSeconds }
+        : {}),
+    }))
+    .sort((a, b) => (a.durationSeconds ?? Infinity) - (b.durationSeconds ?? Infinity))
+    .concat(registryAlternatives);
+
+  const recommended = {
+    source: result.selected.source ?? 'google',
+    description: result.selected.description,
+    durationSeconds: result.selected.durationSeconds,
+    staticDurationSeconds: result.selected.staticDurationSeconds,
+    distanceMeters: result.selected.distanceMeters ?? null,
+    matchedCorridorId,
+    reason: result.reason,
+  };
+
   debugLog('planSegment', options, 'Segment planifié', {
-    selected: result.selected.description,
-    matchedCorridor: result.matchedCorridor?.id ?? null,
+    recommended: recommended.description,
+    matchedCorridor: matchedCorridorId,
+    alternativeCount: alternatives.length,
     reason: result.reason,
   });
-  return { ...result, traffic, alternatives };
+
+  return {
+    ...result,
+    traffic,
+    alternatives,
+    recommended,
+    osrmAlternatives,
+  };
 }
 
 module.exports = {
