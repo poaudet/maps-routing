@@ -96,6 +96,11 @@ test('planSegment selects the registered corridor from a mocked Google response 
   assert.equal(result.recommended.source, 'google');
   assert.equal(result.recommended.matchedCorridorId, 'corridor-beloeil-home-work');
   assert.match(result.recommended.reason, /Biais registre/);
+  assert.equal(
+    result.recommended.googleMapsUrl,
+    'https://www.google.com/maps/dir/?api=1&origin=45.5668%2C-73.2032&destination=45.5019%2C-73.5674' +
+      '&travelmode=driving&waypoints=45.5403%2C-73.4466%7C45.52%2C-73.5'
+  );
   assert.equal(result.alternatives.length, 1);
   assert.deepEqual(result.alternatives[0], {
     source: 'google',
@@ -106,6 +111,9 @@ test('planSegment selects the registered corridor from a mocked Google response 
     distanceMeters: 32000,
     deltaSeconds: -50,
     matchedCorridorId: null,
+    googleMapsUrl:
+      'https://www.google.com/maps/dir/?api=1&origin=45.5668%2C-73.2032&destination=45.5019%2C-73.5674' +
+      '&travelmode=driving&waypoints=45.6%2C-73.5',
   });
 });
 
@@ -179,6 +187,9 @@ test('planSegment detects high traffic and pulls faster alternatives from the OS
       distanceMeters: 33500,
       deltaSeconds: 300,
       matchedCorridorId: null,
+      googleMapsUrl:
+        'https://www.google.com/maps/dir/?api=1&origin=45.5668%2C-73.2032&destination=45.5019%2C-73.5674' +
+        '&travelmode=driving&waypoints=45.6%2C-73.5',
     },
     {
       source: 'registry',
@@ -191,6 +202,9 @@ test('planSegment detects high traffic and pulls faster alternatives from the OS
       durationSeconds: null,
       staticDurationSeconds: null,
       note: 'Corridor enregistré sans route retournée par l\u2019API pour ce segment.',
+      googleMapsUrl:
+        'https://www.google.com/maps/dir/?api=1&origin=45.5668%2C-73.2032&destination=45.5019%2C-73.5674' +
+        '&travelmode=driving&waypoints=45.5403%2C-73.4466',
     },
   ]);
 });

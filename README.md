@@ -56,6 +56,18 @@ de choisir entre plusieurs sources d'alternatives :
 Les champs `selected`, `candidates`, `fastest`, `matchedCorridor`, `reason` et
 `traffic` restent exposés pour compatibilité.
 
+### Lien Google Maps par option (`googleMapsUrl`)
+
+`recommended` et chaque entrée de `alternatives` exposent un champ
+`googleMapsUrl` : une URL Google Maps Directions (`?api=1`) prête à ouvrir.
+Les points de cheminement de l'option (`stepAnchors` pour les routes
+Google/OSRM, `anchor` pour les corridors du registre) sont **forcés** en tant
+que `waypoints` de l'URL, afin que l'itinéraire ouvert dans Google Maps par
+l'utilisateur reproduise exactement l'option évaluée par l'optimiseur — au
+lieu de laisser Google Maps recalculer un itinéraire potentiellement
+différent entre le point A et le point B (voir `src/mapsLink.js`).
+
+
 ## Format du registre (`route-cache.json`)
 
 ```json
