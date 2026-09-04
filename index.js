@@ -17,6 +17,7 @@ const { updateRegistry } = require('./src/learning');
 const { fetchAlternativesMatrix, rankMatrixAlternatives } = require('./src/osrm');
 const { resolvePlace, resolvePlaces } = require('./src/geocode');
 const { debugLog } = require('./src/debug');
+const { buildGoogleMapsRouteUrl } = require('./src/mapsLink');
 
 /**
  * Évalue un segment entre deux points intermédiaires et retourne une réponse
@@ -106,6 +107,11 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
     );
   }
 
+  // Lien Google Maps forçant les waypoints d'une option (stepAnchors ou
+  // ancrage de corridor) : garantit que l'itinéraire ouvert par l'utilisateur
+  // reproduit exactement l'option évaluée entre pointA et pointB.
+  const googleMapsUrlFor = (waypoints) => buildGoogleMapsRouteUrl(pointA, pointB, waypoints);
+
   const result = optimizeSegment(pool, registry, { pointA, pointB }, options);
   const matchedCorridorId = result.matchedCorridor?.id ?? null;
 
@@ -152,12 +158,21 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
         segmentCorridors.find((corridor) =>
           optionMatchesCorridor(route, corridor, options.anchorToleranceMeters)
         )?.id ?? null,
+      // Waypoints forcés vers Google Maps : garantit que l'itinéraire ouvert
+      // par l'utilisateur correspond exactement à cette option (et non à un
+      // itinéraire recalculé par Google Maps entre pointA et pointB).
+      googleMapsUrl: googleMapsUrlFor(route.stepAnchors),
       ...(route.source === 'osrm'
         ? { viaIndex: route.viaIndex, gainSeconds: route.gainSeconds }
         : {}),
     }))
     .sort((a, b) => (a.durationSeconds ?? Infinity) - (b.durationSeconds ?? Infinity))
-    .concat(registryAlternatives);
+    .concat(
+      registryAlternatives.map((alt) => ({
+        ...alt,
+        googleMapsUrl: googleMapsUrlFor([alt.anchor]),
+      }))
+    );
 
   const recommended = {
     source: result.selected.source ?? 'google',
@@ -167,6 +182,9 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
     distanceMeters: result.selected.distanceMeters ?? null,
     matchedCorridorId,
     reason: result.reason,
+    // Waypoints forcés (stepAnchors de la route sélectionnée) pour que le
+    // lien Google Maps reproduise l'itinéraire exact recommandé.
+    googleMapsUrl: googleMapsUrlFor(result.selected.stepAnchors),
   };
 
   debugLog('planSegment', options, 'Segment planifié', {
@@ -195,4 +213,5 @@ module.exports = {
   osrm: require('./src/osrm'),
   geocode: require('./src/geocode'),
   server: require('./src/server'),
+  mapsLink: require('./src/mapsLink'),
 };
