@@ -44,6 +44,24 @@ paths:
               schema:
                 $ref: '#/components/schemas/Registry'
 
+  /web:
+    get:
+      operationId: getWeb
+      summary: Interface web minimaliste pour interagir avec POST /plan
+      description: >-
+        Sert une page HTML (text/html) autonome permettant de saisir deux
+        points intermédiaires (nom de lieu ou coordonnées « lat,lng »),
+        d'appeler POST /plan et d'afficher la route recommandée, les
+        alternatives et les liens Google Maps associés.
+      responses:
+        '200':
+          description: Page HTML de l'interface web
+          content:
+            text/html:
+              schema:
+                type: string
+                example: '<!DOCTYPE html><html lang="fr">...</html>'
+
   /plan:
     post:
       operationId: postPlan

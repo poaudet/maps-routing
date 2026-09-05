@@ -162,6 +162,11 @@ Le serveur HTTP (`src/server.js`, `npm start`) expose `GET /health`,
 cette API (schémas de requête/réponse) est documenté au format OpenAPI 3.0
 dans [`openapi.yaml`](./openapi.yaml).
 
+`GET /web` sert une interface web minimaliste (page HTML autonome) pour
+interagir avec `POST /plan` : saisie des points A/B (nom de lieu ou
+coordonnées « lat,lng »), route recommandée, alternatives et liens Google
+Maps. Ouvrir http://localhost:3000/web après `npm start`.
+
 ## Tests
 
 ```sh

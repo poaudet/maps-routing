@@ -228,6 +228,22 @@ test('GET /corridors returns the registry as JSON', async () => {
   }
 });
 
+test('GET /web returns the HTML UI for the plan endpoint', async () => {
+  const { server, baseUrl } = await listen({ registryPath: tmpRegistryPath() });
+  try {
+    const response = await fetch(`${baseUrl}/web`);
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type'), /text\/html/);
+    const body = await response.text();
+    assert.match(body, /<!DOCTYPE html>/i);
+    assert.match(body, /\/plan/);
+    assert.match(body, /pointA/);
+    assert.match(body, /pointB/);
+  } finally {
+    server.close();
+  }
+});
+
 test('unknown routes return a JSON 404', async () => {
   const { server, baseUrl } = await listen({ registryPath: tmpRegistryPath() });
   try {
