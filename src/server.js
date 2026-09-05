@@ -18,12 +18,15 @@
  *                      de lieux ("Beloeil", { "name": "Beloeil" }).
  *   POST /feedback   → { pointA, pointB, anchor, name?, ... }
  *                      Réponse updateRegistry : { corridor, created, registryPath }
+ *   GET  /web        → page HTML (text/html) : UI minimaliste interagissant
+ *                      uniquement avec POST /plan.
  */
 
 const http = require('node:http');
 
 const { loadRegistry, DEFAULT_REGISTRY_PATH } = require('./registry');
 const { updateRegistry } = require('./learning');
+const { WEB_PAGE } = require('./web');
 
 const DEFAULT_PORT = 3000;
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -36,6 +39,15 @@ function sendJson(res, statusCode, payload) {
     'Content-Length': Buffer.byteLength(body),
   });
   res.end(body);
+}
+
+/** Envoie une réponse HTML (Content-Type text/html). */
+function sendHtml(res, statusCode, html) {
+  res.writeHead(statusCode, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Content-Length': Buffer.byteLength(html),
+  });
+  res.end(html);
 }
 
 /** Lit et parse le corps JSON d'une requête (limite : MAX_BODY_BYTES). */
@@ -94,6 +106,7 @@ function createServer(options = {}) {
 
   const routes = {
     'GET /health': (req, res) => sendJson(res, 200, { status: 'ok' }),
+    'GET /web': (req, res) => sendHtml(res, 200, WEB_PAGE),
     'GET /corridors': (req, res) => {
       const registry = loadRegistry(registryPath);
       sendJson(res, 200, registry);
@@ -179,7 +192,7 @@ function startServer(options = {}) {
     server.listen(port, () => {
       console.log(
         `[maps-routing:rest] API REST en écoute sur http://localhost:${port} ` +
-          '(GET /health, GET /corridors, POST /plan, POST /feedback)'
+          '(GET /health, GET /corridors, POST /plan, POST /feedback, GET /web)'
       );
       resolve(server);
     });
