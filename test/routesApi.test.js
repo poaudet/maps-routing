@@ -19,6 +19,8 @@ const DESTINATION = { lat: 45.5019, lng: -73.5674 };
 test('field mask targets duration and staticDuration', () => {
   assert.ok(FIELD_MASK.includes('routes.duration'));
   assert.ok(FIELD_MASK.includes('routes.staticDuration'));
+  assert.ok(FIELD_MASK.includes('routes.legs.steps.staticDuration'));
+  assert.ok(!FIELD_MASK.includes('routes.legs.steps.duration'));
 });
 
 test('parseDurationSeconds accepts protobuf strings and numbers', () => {

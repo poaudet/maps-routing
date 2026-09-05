@@ -85,7 +85,7 @@ async function resolvePlace(place, options = {}) {
   return {
     lat: location.lat,
     lng: location.lng,
-    name: (typeof place === 'object' ? place.name : null) ?? best.formatted_address ?? name,
+    name: best.formatted_address ?? name,
   };
 }
 
