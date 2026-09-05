@@ -47,7 +47,9 @@ const { buildGoogleMapsRouteUrl } = require('./src/mapsLink');
  * @param {number} [options.congestionRatio] Seuil de trafic élevé (défaut : 0.25).
  * @param {Array<{lat: number, lng: number}|{name: string}|string>} [options.matrixWaypoints]
  *   Points intermédiaires pour la matrice OSRM (défaut : [pointA, pointB]) ;
- *   les noms de lieux y sont aussi résolus.
+ *   les noms de lieux y sont aussi résolus. Lorsqu'une plage d'étapes Google
+ *   est congestionnée, cette valeur est remplacée par les bornes de cette
+ *   plage afin de ne réacheminer que le tronçon concerné.
  * @param {string} [options.osrmBaseUrl] Serveur OSRM ou fournisseur alternatif.
  * @param {string} [options.geocodeBaseUrl] Service de géocodage alternatif.
  * @param {boolean|function} [options.debug] Active le journal de débogage de

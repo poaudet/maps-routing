@@ -9,6 +9,7 @@ const {
   parseDurationSeconds,
   toDepartureTimeString,
   normalizeRoute,
+  findCongestedStepRanges,
   fetchRouteAlternatives,
 } = require('../src/routesApi');
 
@@ -103,6 +104,45 @@ test('normalizeRoute defaults description and handles missing legs', () => {
   const route = normalizeRoute({ duration: '60s', staticDuration: '55s' }, 0);
   assert.equal(route.description, 'route-0');
   assert.deepEqual(route.stepAnchors, []);
+});
+
+test('findCongestedStepRanges returns the exact boundaries around busy steps', () => {
+  const route = normalizeRoute({
+    duration: '600s',
+    staticDuration: '450s',
+    legs: [
+      {
+        startLocation: { latLng: { latitude: 45, longitude: -73 } },
+        steps: [
+          {
+            startLocation: { latLng: { latitude: 45, longitude: -73 } },
+            endLocation: { latLng: { latitude: 45.1, longitude: -73.1 } },
+            duration: '100s',
+            staticDuration: '100s',
+          },
+          {
+            startLocation: { latLng: { latitude: 45.1, longitude: -73.1 } },
+            endLocation: { latLng: { latitude: 45.2, longitude: -73.2 } },
+            duration: '200s',
+            staticDuration: '100s',
+          },
+          {
+            startLocation: { latLng: { latitude: 45.2, longitude: -73.2 } },
+            endLocation: { latLng: { latitude: 45.3, longitude: -73.3 } },
+            duration: '250s',
+            staticDuration: '100s',
+          },
+        ],
+      },
+    ],
+  }, 0);
+
+  assert.deepEqual(findCongestedStepRanges(route), [{
+    start: { lat: 45.1, lng: -73.1 },
+    end: { lat: 45.3, lng: -73.3 },
+    durationSeconds: 450,
+    staticDurationSeconds: 200,
+  }]);
 });
 
 test('toDepartureTimeString normalizes strings, numbers and Date instances', () => {
