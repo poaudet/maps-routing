@@ -51,8 +51,11 @@ paths:
       description: >-
         Sert une page HTML (text/html) autonome permettant de saisir deux
         points intermédiaires (nom de lieu ou coordonnées « lat,lng »),
-        d'appeler POST /plan et d'afficher la route recommandée, les
-        alternatives et les liens Google Maps associés.
+        de régler toutes les options de POST /plan (matrixWaypoints,
+        toleranceRatio, congestionRatio, anchorToleranceMeters, osrmBaseUrl,
+        geocodeBaseUrl, departureTime, debug), d'appeler POST /plan et
+        d'afficher la route recommandée, les alternatives, l'état du trafic
+        et les liens Google Maps associés.
       responses:
         '200':
           description: Page HTML de l'interface web
