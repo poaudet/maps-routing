@@ -76,6 +76,9 @@ async function fetchAlternativesMatrix(coordinates, options = {}) {
  * @param {number} [options.destinationIndex] Indice du point d'arrivée (défaut : 1).
  * @param {number} [options.currentDurationSeconds] Durée de référence à battre
  *   (défaut : durée directe origine → destination de la matrice).
+ * @param {boolean} [options.includeDirect] Inclut la liaison directe comme
+ *   alternative (utile quand la matrice ne contient que les bornes d'un
+ *   segment congestionné).
  * @returns {Array<{viaIndex: number, durationSeconds: number, gainSeconds: number}>}
  *   Alternatives triées par durée croissante.
  */
@@ -94,6 +97,14 @@ function rankMatrixAlternatives(durations, options = {}) {
   }
 
   const alternatives = [];
+  const directDuration = durations[originIndex]?.[destinationIndex];
+  if (options.includeDirect && Number.isFinite(directDuration) && directDuration < reference) {
+    alternatives.push({
+      viaIndex: null,
+      durationSeconds: directDuration,
+      gainSeconds: reference - directDuration,
+    });
+  }
   for (let via = 0; via < durations.length; via += 1) {
     if (via === originIndex || via === destinationIndex) {
       continue;
