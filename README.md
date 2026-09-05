@@ -164,7 +164,10 @@ dans [`openapi.yaml`](./openapi.yaml).
 
 `GET /web` sert une interface web minimaliste (page HTML autonome) pour
 interagir avec `POST /plan` : saisie des points A/B (nom de lieu ou
-coordonnées « lat,lng »), route recommandée, alternatives et liens Google
+coordonnées « lat,lng »), toutes les options de planification
+(`toleranceRatio`, `congestionRatio`, `anchorToleranceMeters`,
+`matrixWaypoints`, `departureTime`, `osrmBaseUrl`, `geocodeBaseUrl`,
+`debug`), route recommandée, alternatives, état du trafic et liens Google
 Maps. Ouvrir http://localhost:3000/web après `npm start`.
 
 ## Tests

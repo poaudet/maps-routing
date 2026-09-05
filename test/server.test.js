@@ -228,7 +228,7 @@ test('GET /corridors returns the registry as JSON', async () => {
   }
 });
 
-test('GET /web returns the HTML UI for the plan endpoint', async () => {
+test('GET /web returns the HTML UI exposing all POST /plan options', async () => {
   const { server, baseUrl } = await listen({ registryPath: tmpRegistryPath() });
   try {
     const response = await fetch(`${baseUrl}/web`);
@@ -237,8 +237,21 @@ test('GET /web returns the HTML UI for the plan endpoint', async () => {
     const body = await response.text();
     assert.match(body, /<!DOCTYPE html>/i);
     assert.match(body, /\/plan/);
-    assert.match(body, /pointA/);
-    assert.match(body, /pointB/);
+    // Points et toutes les options du point d'entrée POST /plan.
+    for (const field of [
+      'pointA',
+      'pointB',
+      'matrixWaypoints',
+      'toleranceRatio',
+      'congestionRatio',
+      'anchorToleranceMeters',
+      'osrmBaseUrl',
+      'geocodeBaseUrl',
+      'departureTime',
+      'debug',
+    ]) {
+      assert.match(body, new RegExp(`id="${field}"`), `champ ${field} manquant dans la page /web`);
+    }
   } finally {
     server.close();
   }

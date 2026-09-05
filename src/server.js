@@ -19,7 +19,7 @@
  *   POST /feedback   → { pointA, pointB, anchor, name?, ... }
  *                      Réponse updateRegistry : { corridor, created, registryPath }
  *   GET  /web        → page HTML (text/html) : UI minimaliste interagissant
- *                      uniquement avec POST /plan.
+ *                      avec POST /plan (toutes les options exposées).
  */
 
 const http = require('node:http');
