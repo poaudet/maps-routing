@@ -133,8 +133,8 @@ const WEB_PAGE = `<!DOCTYPE html>
       </div>
       <div>
         <label for="matrixWaypoints">Waypoints matrice OSRM</label>
-        <textarea id="matrixWaypoints" name="matrixWaypoints" rows="3" placeholder="Beloeil, 45.55,-73.4, Montreal Downtown"></textarea>
-        <div class="hint">Noms de lieux ou « lat,lng », séparés par des virgules ou des retours à la ligne (défaut : pointA, pointB).</div>
+        <textarea id="matrixWaypoints" name="matrixWaypoints" rows="3" placeholder="Beloeil&#10;45.55,-73.4&#10;Montreal Downtown"></textarea>
+        <div class="hint">Un waypoint par ligne (« lat,lng » ou nom de lieu) ; une seule ligne : séparateur « ; » (défaut : pointA, pointB).</div>
       </div>
       <div>
         <label class="checkbox" for="debug"><input id="debug" name="debug" type="checkbox"> Journal de débogage</label>
@@ -162,12 +162,14 @@ function parsePoint(raw) {
   return raw.trim();
 }
 
-// Liste de waypoints séparés par des retours à la ligne ou des virgules ;
-// chaque élément accepte « lat,lng » ou un nom de lieu.
+// Liste de waypoints, un par ligne (chacun : « lat,lng » ou un nom de lieu) ;
+// une ligne sans retour accepte plusieurs noms de lieux séparés par des
+// points-virgules (la virgule ne peut servir de séparateur : « lat,lng » en
+// contient déjà une).
 function parseWaypoints(raw) {
   const trimmed = raw.trim();
   if (!trimmed) return undefined;
-  const items = trimmed.includes('\\n') ? trimmed.split(/\\r?\\n/) : trimmed.split(',');
+  const items = trimmed.includes('\\n') ? trimmed.split(/\\r?\\n/) : trimmed.split(';');
   const points = items.map((item) => item.trim()).filter(Boolean).map(parsePoint);
   return points.length > 0 ? points : undefined;
 }
@@ -246,7 +248,7 @@ function routeCard(route, { recommended = false } = {}) {
     parts.push('Δ ' + sign + formatDuration(Math.abs(route.deltaSeconds)));
   }
   if (route.matchedCorridorId) parts.push('Corridor : ' + route.matchedCorridorId);
-  if (route.gainSeconds !== undefined && route.gainSeconds !== null) {
+  if (route.gainSeconds != null) {
     parts.push('Gain : ' + formatDuration(route.gainSeconds));
   }
   meta.textContent = parts.join(' — ');
