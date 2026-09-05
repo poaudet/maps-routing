@@ -14,7 +14,9 @@ const { loadRegistry, DEFAULT_REGISTRY_PATH, findCorridorsForSegment } = require
 const {
   fetchRouteAlternatives,
   detectHighTraffic,
+  findCongestedLegRanges,
   findCongestedStepRanges,
+  findCongestedRanges,
 } = require('./src/routesApi');
 const { optimizeSegment, optionMatchesCorridor } = require('./src/optimizer');
 const { updateRegistry } = require('./src/learning');
@@ -84,16 +86,16 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
     traffic,
   });
 
-  // Trafic élevé : réachemine chaque groupe d'étapes congestionnées. Les
-  // bornes viennent de la route Google; matrixWaypoints ne doit pas élargir le
-  // calcul à un autre segment.
+  // Trafic élevé : réachemine chaque groupe de legs/étapes congestionnées. Les
+  // bornes viennent de la route Google (legs en priorité, puis steps en repli);
+  // matrixWaypoints ne doit pas élargir le calcul à un autre segment.
   let osrmAlternatives = null;
   let pool = routes.map((route) => ({ ...route, source: route.source ?? 'google' }));
   if (traffic.congested) {
-    const stepRanges = findCongestedStepRanges(fastest, options.congestionRatio);
-    const hasStepTraffic = stepRanges.length > 0;
-    const reroutes = hasStepTraffic
-      ? stepRanges
+    const congestedRanges = findCongestedRanges(fastest, options.congestionRatio);
+    const hasCongestedRanges = congestedRanges.length > 0;
+    const reroutes = hasCongestedRanges
+      ? congestedRanges
       : [
           {
             start: null,
@@ -102,30 +104,30 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
           },
         ];
     osrmAlternatives = [];
-        let legacyWaypoints = null;
-        for (const range of reroutes) {
-          const waypoints = hasStepTraffic
+    let legacyWaypoints = null;
+    for (const range of reroutes) {
+      const waypoints = hasCongestedRanges
         ? [range.start, range.end]
         : options.matrixWaypoints
           ? await resolvePlaces(options.matrixWaypoints, options)
           : [pointA, pointB];
-      if (!hasStepTraffic) legacyWaypoints = waypoints;
+      if (!hasCongestedRanges) legacyWaypoints = waypoints;
       debugLog('planSegment', options, 'Trafic élevé : requête de la matrice OSRM', {
         waypoints,
-        segment: hasStepTraffic ? range : null,
+        segment: hasCongestedRanges ? range : null,
       });
       const matrix = await fetchAlternativesMatrix(waypoints, options);
       const segmentAlternatives = rankMatrixAlternatives(matrix.durations, {
         ...options,
-        currentDurationSeconds: hasStepTraffic
+        currentDurationSeconds: hasCongestedRanges
           ? range.durationSeconds
           : fastest.durationSeconds,
-        includeDirect: hasStepTraffic,
+        includeDirect: hasCongestedRanges,
       });
       osrmAlternatives.push(
         ...segmentAlternatives.map((alt) => ({
           ...alt,
-          ...(hasStepTraffic
+          ...(hasCongestedRanges
             ? {
                 segmentStart: range.start,
                 segmentEnd: range.end,
@@ -147,7 +149,7 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
         staticDurationSeconds: alt.durationSeconds,
         distanceMeters: null,
         polyline: null,
-        stepAnchors: hasStepTraffic
+        stepAnchors: hasCongestedRanges
           ? [alt.segmentStart, alt.segmentEnd].filter(Boolean)
           : [legacyWaypoints?.[alt.viaIndex]].filter(Boolean),
         source: 'osrm',

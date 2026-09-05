@@ -209,6 +209,71 @@ test('planSegment detects high traffic and pulls faster alternatives from the OS
   ]);
 });
 
+test('planSegment reroutes the congested Google leg range with priority', async () => {
+  const registryPath = tmpRegistryPath();
+  const matrixWaypoint = { lat: 46, lng: -72 };
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(String(url));
+    if (isGoogleRoutesUrl(url)) {
+      return {
+        ok: true,
+        json: async () => ({
+          routes: [{
+            description: 'Route avec leg congestionné',
+            duration: '1000s',
+            staticDuration: '700s',
+            distanceMeters: 30000,
+            legs: [
+              {
+                startLocation: { latLng: { latitude: POINT_A.lat, longitude: POINT_A.lng } },
+                endLocation: { latLng: { latitude: 45.55, longitude: -73.3 } },
+                duration: '200s',
+                staticDuration: '200s',
+              },
+              {
+                startLocation: { latLng: { latitude: 45.55, longitude: -73.3 } },
+                endLocation: { latLng: { latitude: 45.52, longitude: -73.4 } },
+                duration: '500s',
+                staticDuration: '200s',
+              },
+              {
+                startLocation: { latLng: { latitude: 45.52, longitude: -73.4 } },
+                endLocation: { latLng: { latitude: POINT_B.lat, longitude: POINT_B.lng } },
+                duration: '300s',
+                staticDuration: '300s',
+              },
+            ],
+          }],
+        }),
+      };
+    }
+    assert.match(String(url), /-73\.3,45\.55;-73\.4,45\.52/);
+    assert.doesNotMatch(String(url), /46,-72/);
+    return {
+      ok: true,
+      json: async () => ({
+        code: 'Ok',
+        durations: [[0, 200], [200, 0]],
+      }),
+    };
+  };
+
+  const result = await planSegment(POINT_A, POINT_B, {
+    apiKey: 'demo',
+    fetchImpl,
+    registryPath,
+    matrixWaypoints: [POINT_A, POINT_B, matrixWaypoint],
+  });
+
+  assert.equal(calls.length, 2);
+  assert.equal(result.osrmAlternatives[0].durationSeconds, 700);
+  assert.equal(result.recommended.source, 'osrm');
+  assert.equal(result.recommended.durationSeconds, 700);
+  assert.deepEqual(result.osrmAlternatives[0].segmentStart, { lat: 45.55, lng: -73.3 });
+  assert.deepEqual(result.osrmAlternatives[0].segmentEnd, { lat: 45.52, lng: -73.4 });
+});
+
 test('planSegment reroutes only the congested Google step range', async () => {
   const registryPath = tmpRegistryPath();
   const matrixWaypoint = { lat: 46, lng: -72 };

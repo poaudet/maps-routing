@@ -25,10 +25,12 @@ const FIELD_MASK = [
   'routes.distanceMeters',
   'routes.description',
   'routes.polyline.encodedPolyline',
+  'routes.legs.duration',
+  'routes.legs.staticDuration',
   'routes.legs.startLocation',
+  'routes.legs.endLocation',
   'routes.legs.steps.endLocation',
   'routes.legs.steps.startLocation',
-  'routes.legs.steps.duration',
   'routes.legs.steps.staticDuration',
 ].join(',');
 
@@ -110,22 +112,56 @@ function normalizeLocation(location) {
 }
 
 function normalizeRoute(route, index, origin) {
-  const steps = (route.legs || []).flatMap((leg) =>
-    (leg.steps || []).map((step, stepIndex) => ({
-      index: stepIndex,
-      start: normalizeLocation(step.startLocation) || normalizeLocation(leg.startLocation),
-      end: normalizeLocation(step.endLocation),
+  let previousEnd = origin ?? null;
+  const legs = (route.legs || []).map((leg, legIndex) => {
+    let legStart = normalizeLocation(leg.startLocation) || previousEnd;
+    const steps = (leg.steps || []).map((step, stepIndex) => {
+      const stepStart = normalizeLocation(step.startLocation) || (stepIndex === 0 ? legStart : null);
+      const stepEnd = normalizeLocation(step.endLocation);
+      return {
+        index: stepIndex,
+        start: stepStart,
+        end: stepEnd,
+        durationSeconds:
+          step.duration === undefined ? null : parseDurationSeconds(step.duration),
+        staticDurationSeconds:
+          step.staticDuration === undefined ? null : parseDurationSeconds(step.staticDuration),
+      };
+    });
+
+    if (steps[0] && !steps[0].start) {
+      steps[0].start = legStart;
+    }
+    for (let sIndex = 1; sIndex < steps.length; sIndex += 1) {
+      if (!steps[sIndex].start) steps[sIndex].start = steps[sIndex - 1].end;
+    }
+
+    if (!legStart && steps[0]?.start) {
+      legStart = steps[0].start;
+    }
+    const legEnd = normalizeLocation(leg.endLocation) || steps[steps.length - 1]?.end || null;
+    if (legEnd) {
+      previousEnd = legEnd;
+    }
+
+    return {
+      index: legIndex,
+      start: legStart,
+      end: legEnd,
       durationSeconds:
-        step.duration === undefined ? null : parseDurationSeconds(step.duration),
+        leg.duration === undefined ? null : parseDurationSeconds(leg.duration),
       staticDurationSeconds:
-        step.staticDuration === undefined ? null : parseDurationSeconds(step.staticDuration),
-    }))
-  );
+        leg.staticDuration === undefined ? null : parseDurationSeconds(leg.staticDuration),
+      steps,
+    };
+  });
+
+  const steps = legs.flatMap((leg) => leg.steps);
   if (steps[0] && !steps[0].start) {
     steps[0].start = origin ?? null;
   }
-  for (let index = 1; index < steps.length; index += 1) {
-    if (!steps[index].start) steps[index].start = steps[index - 1].end;
+  for (let sIndex = 1; sIndex < steps.length; sIndex += 1) {
+    if (!steps[sIndex].start) steps[sIndex].start = steps[sIndex - 1].end;
   }
 
   return {
@@ -136,6 +172,7 @@ function normalizeRoute(route, index, origin) {
     distanceMeters: route.distanceMeters ?? null,
     polyline: route.polyline?.encodedPolyline ?? null,
     stepAnchors: steps.map((step) => step.end).filter(Boolean),
+    legs,
     steps,
   };
 }
@@ -211,6 +248,50 @@ async function fetchRouteAlternatives(origin, destination, options = {}) {
 }
 
 /**
+ * Regroupe les legs contigus dont le temps réel dépasse le seuil de trafic.
+ * Chaque groupe fournit les bornes exactes du/des legs à réacheminer.
+ */
+function findCongestedLegRanges(route, congestionRatio = DEFAULT_CONGESTION_RATIO) {
+  const ranges = [];
+  let current = null;
+  for (const leg of route.legs || []) {
+    if (
+      !Number.isFinite(leg.durationSeconds) ||
+      !Number.isFinite(leg.staticDurationSeconds) ||
+      leg.staticDurationSeconds <= 0
+    ) {
+      if (current) ranges.push(current);
+      current = null;
+      continue;
+    }
+    const congested =
+      (leg.durationSeconds - leg.staticDurationSeconds) / leg.staticDurationSeconds >
+      congestionRatio;
+    if (!congested) {
+      if (current) ranges.push(current);
+      current = null;
+      continue;
+    }
+    const legStart = leg.start || leg.steps?.[0]?.start || null;
+    const legEnd = leg.end || leg.steps?.[leg.steps.length - 1]?.end || null;
+    if (!current) {
+      current = {
+        start: legStart,
+        end: legEnd,
+        durationSeconds: leg.durationSeconds,
+        staticDurationSeconds: leg.staticDurationSeconds,
+      };
+    } else {
+      current.end = legEnd || current.end;
+      current.durationSeconds += leg.durationSeconds;
+      current.staticDurationSeconds += leg.staticDurationSeconds;
+    }
+  }
+  if (current) ranges.push(current);
+  return ranges.filter((range) => range.start && range.end);
+}
+
+/**
  * Regroupe les étapes contiguës dont le temps réel dépasse le seuil de trafic.
  * Chaque groupe fournit les bornes exactes à réacheminer, plutôt qu'une
  * waypointMatrix globale.
@@ -254,6 +335,23 @@ function findCongestedStepRanges(route, congestionRatio = DEFAULT_CONGESTION_RAT
 }
 
 /**
+ * Détermine les plages congestionnées d'une route en considérant d'abord les
+ * legs, puis avec repli (fallback) sur les steps si disponibles, ou retour vide
+ * pour un repli sur l'ensemble du segment.
+ */
+function findCongestedRanges(route, congestionRatio = DEFAULT_CONGESTION_RATIO) {
+  const legRanges = findCongestedLegRanges(route, congestionRatio);
+  if (legRanges.length > 0) {
+    return legRanges;
+  }
+  const stepRanges = findCongestedStepRanges(route, congestionRatio);
+  if (stepRanges.length > 0) {
+    return stepRanges;
+  }
+  return [];
+}
+
+/**
  * Détecte un trafic élevé sur une option normalisée en comparant la durée en
  * temps réel (`durationSeconds`) au temps en conditions fluides
  * (`staticDurationSeconds`, free-flow).
@@ -276,6 +374,8 @@ module.exports = {
   toDepartureTimeString,
   normalizeRoute,
   detectHighTraffic,
+  findCongestedLegRanges,
   findCongestedStepRanges,
+  findCongestedRanges,
   fetchRouteAlternatives,
 };

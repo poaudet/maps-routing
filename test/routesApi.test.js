@@ -9,7 +9,9 @@ const {
   parseDurationSeconds,
   toDepartureTimeString,
   normalizeRoute,
+  findCongestedLegRanges,
   findCongestedStepRanges,
+  findCongestedRanges,
   fetchRouteAlternatives,
 } = require('../src/routesApi');
 
@@ -19,6 +21,12 @@ const DESTINATION = { lat: 45.5019, lng: -73.5674 };
 test('field mask targets duration and staticDuration', () => {
   assert.ok(FIELD_MASK.includes('routes.duration'));
   assert.ok(FIELD_MASK.includes('routes.staticDuration'));
+  assert.ok(FIELD_MASK.includes('routes.legs.duration'));
+  assert.ok(FIELD_MASK.includes('routes.legs.staticDuration'));
+  assert.ok(FIELD_MASK.includes('routes.legs.startLocation'));
+  assert.ok(FIELD_MASK.includes('routes.legs.endLocation'));
+  assert.ok(FIELD_MASK.includes('routes.legs.steps.staticDuration'));
+  assert.ok(!FIELD_MASK.includes('routes.legs.steps.duration'));
 });
 
 test('parseDurationSeconds accepts protobuf strings and numbers', () => {
@@ -104,6 +112,100 @@ test('normalizeRoute defaults description and handles missing legs', () => {
   const route = normalizeRoute({ duration: '60s', staticDuration: '55s' }, 0);
   assert.equal(route.description, 'route-0');
   assert.deepEqual(route.stepAnchors, []);
+});
+
+test('findCongestedLegRanges returns the exact boundaries around busy legs', () => {
+  const route = normalizeRoute({
+    duration: '1200s',
+    staticDuration: '800s',
+    legs: [
+      {
+        startLocation: { latLng: { latitude: 45.0, longitude: -73.0 } },
+        endLocation: { latLng: { latitude: 45.1, longitude: -73.1 } },
+        duration: '200s',
+        staticDuration: '200s',
+      },
+      {
+        startLocation: { latLng: { latitude: 45.1, longitude: -73.1 } },
+        endLocation: { latLng: { latitude: 45.2, longitude: -73.2 } },
+        duration: '600s',
+        staticDuration: '300s',
+      },
+      {
+        startLocation: { latLng: { latitude: 45.2, longitude: -73.2 } },
+        endLocation: { latLng: { latitude: 45.3, longitude: -73.3 } },
+        duration: '400s',
+        staticDuration: '300s',
+      },
+    ],
+  }, 0);
+
+  assert.deepEqual(findCongestedLegRanges(route, 0.2), [{
+    start: { lat: 45.1, lng: -73.1 },
+    end: { lat: 45.3, lng: -73.3 },
+    durationSeconds: 1000,
+    staticDurationSeconds: 600,
+  }]);
+});
+
+test('findCongestedRanges falls back from legs to steps', () => {
+  // Case 1: Legs have traffic data
+  const routeWithLegs = normalizeRoute({
+    duration: '800s',
+    staticDuration: '500s',
+    legs: [
+      {
+        startLocation: { latLng: { latitude: 45.0, longitude: -73.0 } },
+        endLocation: { latLng: { latitude: 45.1, longitude: -73.1 } },
+        duration: '500s',
+        staticDuration: '200s',
+      },
+      {
+        startLocation: { latLng: { latitude: 45.1, longitude: -73.1 } },
+        endLocation: { latLng: { latitude: 45.2, longitude: -73.2 } },
+        duration: '300s',
+        staticDuration: '300s',
+      },
+    ],
+  }, 0);
+  assert.deepEqual(findCongestedRanges(routeWithLegs, 0.2), [{
+    start: { lat: 45.0, lng: -73.0 },
+    end: { lat: 45.1, lng: -73.1 },
+    durationSeconds: 500,
+    staticDurationSeconds: 200,
+  }]);
+
+  // Case 2: Legs do not have duration (or are not congested), but steps have congestion data
+  const routeWithStepsOnly = normalizeRoute({
+    duration: '800s',
+    staticDuration: '500s',
+    legs: [
+      {
+        startLocation: { latLng: { latitude: 45.0, longitude: -73.0 } },
+        endLocation: { latLng: { latitude: 45.2, longitude: -73.2 } },
+        steps: [
+          {
+            startLocation: { latLng: { latitude: 45.0, longitude: -73.0 } },
+            endLocation: { latLng: { latitude: 45.1, longitude: -73.1 } },
+            duration: '500s',
+            staticDuration: '200s',
+          },
+          {
+            startLocation: { latLng: { latitude: 45.1, longitude: -73.1 } },
+            endLocation: { latLng: { latitude: 45.2, longitude: -73.2 } },
+            duration: '300s',
+            staticDuration: '300s',
+          },
+        ],
+      },
+    ],
+  }, 0);
+  assert.deepEqual(findCongestedRanges(routeWithStepsOnly, 0.2), [{
+    start: { lat: 45.0, lng: -73.0 },
+    end: { lat: 45.1, lng: -73.1 },
+    durationSeconds: 500,
+    staticDurationSeconds: 200,
+  }]);
 });
 
 test('findCongestedStepRanges returns the exact boundaries around busy steps', () => {
