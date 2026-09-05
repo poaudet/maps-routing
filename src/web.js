@@ -105,7 +105,7 @@ function routeCard(route, { recommended = false } = {}) {
   const card = document.createElement('div');
   card.className = 'card' + (recommended ? ' recommended' : '');
 
-  const title = document.createElement(recommended ? 'h3' : 'h3');
+  const title = document.createElement('h3');
   title.textContent = route.description || route.name || route.corridorId || 'Route';
   const badge = document.createElement('span');
   badge.className = 'badge';
@@ -117,7 +117,8 @@ function routeCard(route, { recommended = false } = {}) {
   meta.className = 'meta';
   const parts = ['Durée : ' + formatDuration(route.durationSeconds)];
   if (route.deltaSeconds !== undefined && route.deltaSeconds !== null) {
-    parts.push('Δ ' + (route.deltaSeconds >= 0 ? '+' : '') + formatDuration(Math.abs(route.deltaSeconds)).replace('?', '0 min'));
+    const sign = route.deltaSeconds >= 0 ? '+' : '-';
+    parts.push('Δ ' + sign + formatDuration(Math.abs(route.deltaSeconds)));
   }
   if (route.matchedCorridorId) parts.push('Corridor : ' + route.matchedCorridorId);
   meta.textContent = parts.join(' — ');
