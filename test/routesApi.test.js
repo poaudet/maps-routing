@@ -7,6 +7,7 @@ const {
   ROUTES_API_URL,
   FIELD_MASK,
   parseDurationSeconds,
+  toDepartureTimeString,
   normalizeRoute,
   fetchRouteAlternatives,
 } = require('../src/routesApi');
@@ -102,4 +103,42 @@ test('normalizeRoute defaults description and handles missing legs', () => {
   const route = normalizeRoute({ duration: '60s', staticDuration: '55s' }, 0);
   assert.equal(route.description, 'route-0');
   assert.deepEqual(route.stepAnchors, []);
+});
+
+test('toDepartureTimeString normalizes strings, numbers and Date instances', () => {
+  assert.equal(toDepartureTimeString('2024-06-01T14:30:00Z'), '2024-06-01T14:30:00.000Z');
+  assert.equal(toDepartureTimeString(new Date('2024-06-01T14:30:00Z')), '2024-06-01T14:30:00.000Z');
+  assert.equal(toDepartureTimeString(1717252200000), new Date(1717252200000).toISOString());
+  assert.throws(() => toDepartureTimeString('not-a-date'), /Invalid departureTime/);
+  assert.throws(() => toDepartureTimeString(''), /Invalid departureTime/);
+});
+
+test('fetchRouteAlternatives includes departureTime in the request body when provided', async () => {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    return { ok: true, json: async () => ({ routes: [] }) };
+  };
+
+  await fetchRouteAlternatives(ORIGIN, DESTINATION, {
+    apiKey: 'test-key',
+    fetchImpl,
+    departureTime: '2024-06-01T14:30:00Z',
+  });
+
+  const body = JSON.parse(calls[0].init.body);
+  assert.equal(body.departureTime, '2024-06-01T14:30:00.000Z');
+});
+
+test('fetchRouteAlternatives omits departureTime when not provided', async () => {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    return { ok: true, json: async () => ({ routes: [] }) };
+  };
+
+  await fetchRouteAlternatives(ORIGIN, DESTINATION, { apiKey: 'test-key', fetchImpl });
+
+  const body = JSON.parse(calls[0].init.body);
+  assert.equal('departureTime' in body, false);
 });

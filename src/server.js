@@ -115,6 +115,7 @@ function createServer(options = {}) {
         anchorToleranceMeters,
         osrmBaseUrl,
         geocodeBaseUrl,
+        departureTime,
         debug,
       } = body;
       const callOptions = {
@@ -125,6 +126,7 @@ function createServer(options = {}) {
         anchorToleranceMeters,
         osrmBaseUrl,
         geocodeBaseUrl,
+        departureTime,
         debug: debug ?? options.debug,
       };
       const result = await planSegment(pointA, pointB, callOptions);
