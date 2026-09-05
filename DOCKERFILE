@@ -1,13 +1,11 @@
 FROM node:24
 
-RUN mkdir /app
-RUN mkdir /app/etc
+WORKDIR /app
 
-COPY .* /app
-COPY ./src/* /app/src
-
+COPY package*.json ./
 RUN npm install
 
-EXPOSE 3000
+COPY . .
 
-CMD npm start
+EXPOSE 3000
+CMD ["npm", "start"]
