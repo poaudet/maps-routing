@@ -25,7 +25,11 @@ const FIELD_MASK = [
   'routes.distanceMeters',
   'routes.description',
   'routes.polyline.encodedPolyline',
+  'routes.legs.startLocation',
   'routes.legs.steps.endLocation',
+  'routes.legs.steps.startLocation',
+  'routes.legs.steps.duration',
+  'routes.legs.steps.staticDuration',
 ].join(',');
 
 function toLatLngLiteral(point) {
@@ -97,12 +101,32 @@ function toDepartureTimeString(departureTime) {
 }
 
 /** Normalise une route brute de l'API en option exploitable par l'optimiseur. */
-function normalizeRoute(route, index) {
-  const stepAnchors = (route.legs || [])
-    .flatMap((leg) => leg.steps || [])
-    .map((step) => step.endLocation?.latLng)
-    .filter(Boolean)
-    .map((latLng) => ({ lat: latLng.latitude, lng: latLng.longitude }));
+function normalizeLocation(location) {
+  const latLng = location?.latLng;
+  if (!latLng || !Number.isFinite(latLng.latitude) || !Number.isFinite(latLng.longitude)) {
+    return null;
+  }
+  return { lat: latLng.latitude, lng: latLng.longitude };
+}
+
+function normalizeRoute(route, index, origin) {
+  const steps = (route.legs || []).flatMap((leg) =>
+    (leg.steps || []).map((step, stepIndex) => ({
+      index: stepIndex,
+      start: normalizeLocation(step.startLocation) || normalizeLocation(leg.startLocation),
+      end: normalizeLocation(step.endLocation),
+      durationSeconds:
+        step.duration === undefined ? null : parseDurationSeconds(step.duration),
+      staticDurationSeconds:
+        step.staticDuration === undefined ? null : parseDurationSeconds(step.staticDuration),
+    }))
+  );
+  if (steps[0] && !steps[0].start) {
+    steps[0].start = origin ?? null;
+  }
+  for (let index = 1; index < steps.length; index += 1) {
+    if (!steps[index].start) steps[index].start = steps[index - 1].end;
+  }
 
   return {
     index,
@@ -111,7 +135,8 @@ function normalizeRoute(route, index) {
     staticDurationSeconds: parseDurationSeconds(route.staticDuration),
     distanceMeters: route.distanceMeters ?? null,
     polyline: route.polyline?.encodedPolyline ?? null,
-    stepAnchors,
+    stepAnchors: steps.map((step) => step.end).filter(Boolean),
+    steps,
   };
 }
 
@@ -175,7 +200,7 @@ async function fetchRouteAlternatives(origin, destination, options = {}) {
   const payload = await response.json();
   debugLog('google', options, 'Réponse computeRoutes', payload);
 
-  const routes = (payload.routes || []).map(normalizeRoute);
+  const routes = (payload.routes || []).map((route, index) => normalizeRoute(route, index, origin));
   debugLog('google', options, `${routes.length} route(s) normalisée(s)`, routes.map((route) => ({
     description: route.description,
     durationSeconds: route.durationSeconds,
@@ -183,6 +208,49 @@ async function fetchRouteAlternatives(origin, destination, options = {}) {
     distanceMeters: route.distanceMeters,
   })));
   return routes;
+}
+
+/**
+ * Regroupe les étapes contiguës dont le temps réel dépasse le seuil de trafic.
+ * Chaque groupe fournit les bornes exactes à réacheminer, plutôt qu'une
+ * waypointMatrix globale.
+ */
+function findCongestedStepRanges(route, congestionRatio = DEFAULT_CONGESTION_RATIO) {
+  const ranges = [];
+  let current = null;
+  for (const step of route.steps || []) {
+    if (
+      !Number.isFinite(step.durationSeconds) ||
+      !Number.isFinite(step.staticDurationSeconds) ||
+      step.staticDurationSeconds <= 0
+    ) {
+      if (current) ranges.push(current);
+      current = null;
+      continue;
+    }
+    const congested =
+      (step.durationSeconds - step.staticDurationSeconds) / step.staticDurationSeconds >
+      congestionRatio;
+    if (!congested) {
+      if (current) ranges.push(current);
+      current = null;
+      continue;
+    }
+    if (!current) {
+      current = {
+        start: step.start,
+        end: step.end,
+        durationSeconds: step.durationSeconds,
+        staticDurationSeconds: step.staticDurationSeconds,
+      };
+    } else {
+      current.end = step.end || current.end;
+      current.durationSeconds += step.durationSeconds;
+      current.staticDurationSeconds += step.staticDurationSeconds;
+    }
+  }
+  if (current) ranges.push(current);
+  return ranges.filter((range) => range.start && range.end);
 }
 
 /**
@@ -208,5 +276,6 @@ module.exports = {
   toDepartureTimeString,
   normalizeRoute,
   detectHighTraffic,
+  findCongestedStepRanges,
   fetchRouteAlternatives,
 };
