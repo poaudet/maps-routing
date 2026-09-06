@@ -132,9 +132,9 @@ const WEB_PAGE = `<!DOCTYPE html>
         <div class="hint">Service de géocodage alternatif.</div>
       </div>
       <div>
-        <label for="matrixWaypoints">Waypoints matrice OSRM</label>
-        <textarea id="matrixWaypoints" name="matrixWaypoints" rows="3" placeholder="Beloeil&#10;45.55,-73.4&#10;Montreal Downtown"></textarea>
-        <div class="hint">Un waypoint par ligne (« lat,lng » ou nom de lieu) ; une seule ligne : séparateur « ; » (défaut : pointA, pointB).</div>
+        <label for="matrixWaypoints">Points de détour candidats (matrice OSRM)</label>
+        <textarea id="matrixWaypoints" name="matrixWaypoints" rows="3" placeholder="45.55,-73.4"></textarea>
+        <div class="hint">Point(s) de détour à tester, EN PLUS de pointA/pointB (déjà inclus automatiquement) ; un par ligne, ou « ; » sur une seule ligne.</div>
       </div>
       <div>
         <label class="checkbox" for="debug"><input id="debug" name="debug" type="checkbox"> Journal de débogage</label>
