@@ -29,6 +29,7 @@ const FIELD_MASK = [
   'routes.legs.staticDuration',
   'routes.legs.startLocation',
   'routes.legs.endLocation',
+  'routes.legs.steps.duration',
   'routes.legs.steps.endLocation',
   'routes.legs.steps.startLocation',
   'routes.legs.steps.staticDuration',
