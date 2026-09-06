@@ -73,6 +73,9 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
 
   const registry = loadRegistry(options.registryPath ?? DEFAULT_REGISTRY_PATH);
   const routes = await fetchRouteAlternatives(pointA, pointB, options);
+  if (routes.length === 0) {
+    throw new Error('Google Maps Routes API returned no routes for this segment');
+  }
 
   // Détection de trafic élevé sur la route sélectionnable la plus rapide.
   const fastest = routes.reduce((best, route) =>
@@ -105,18 +108,28 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
         ];
     osrmAlternatives = [];
     let legacyWaypoints = null;
+    // Candidats de détour résolus une seule fois, réutilisés pour chaque
+    // plage EN PLUS de ses bornes. Sans ces candidats, la matrice OSRM ne
+    // contient jamais que l'origine et la destination, et
+    // rankMatrixAlternatives (osrm.js) n'a aucun index de détour à évaluer :
+    // matrixWaypoints ne peut alors jamais produire d'alternative autre que
+    // la liaison directe (viaIndex: null).
+    const extraVia = options.matrixWaypoints
+      ? await resolvePlaces(options.matrixWaypoints, options)
+      : [];
     for (const range of reroutes) {
       const waypoints = hasCongestedRanges
-        ? [range.start, range.end]
-        : options.matrixWaypoints
-          ? await resolvePlaces(options.matrixWaypoints, options)
-          : [pointA, pointB];
+        ? [range.start, range.end, ...extraVia]
+        : [pointA, pointB, ...extraVia];
       if (!hasCongestedRanges) legacyWaypoints = waypoints;
       debugLog('planSegment', options, 'Trafic élevé : requête de la matrice OSRM', {
         waypoints,
         segment: hasCongestedRanges ? range : null,
       });
-      const matrix = await fetchAlternativesMatrix(waypoints, options);
+      const matrix = await fetchAlternativesMatrix(waypoints, {
+        ...options,
+        baseUrl: options.osrmBaseUrl, // osrm.js reads `baseUrl`; the public option is `osrmBaseUrl`
+      });
       const segmentAlternatives = rankMatrixAlternatives(matrix.durations, {
         ...options,
         currentDurationSeconds: hasCongestedRanges
@@ -139,23 +152,29 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
       );
     }
     pool = pool.concat(
-      osrmAlternatives.map((alt) => ({
-        index: routes.length + alt.viaIndex,
-        description:
-          alt.viaIndex === null
-            ? 'OSRM alternative pour le segment congestionné'
-            : `OSRM alternative via waypoint ${alt.viaIndex}`,
-        durationSeconds: alt.durationSeconds,
-        staticDurationSeconds: alt.durationSeconds,
-        distanceMeters: null,
-        polyline: null,
-        stepAnchors: hasCongestedRanges
-          ? [alt.segmentStart, alt.segmentEnd].filter(Boolean)
-          : [legacyWaypoints?.[alt.viaIndex]].filter(Boolean),
-        source: 'osrm',
-        viaIndex: alt.viaIndex,
-        gainSeconds: alt.gainSeconds,
-      }))
+      osrmAlternatives.map((alt) => {
+        const viaPoint = alt.viaIndex !== null ? extraVia[alt.viaIndex - 2] : null;
+        return {
+          index: routes.length + alt.viaIndex,
+          description:
+            alt.viaIndex === null
+              ? 'OSRM alternative pour le segment congestionné'
+              : `OSRM alternative via ${viaPoint?.name ?? `waypoint ${alt.viaIndex}`}`,
+          durationSeconds: alt.durationSeconds,
+          staticDurationSeconds: alt.durationSeconds,
+          distanceMeters: null,
+          polyline: null,
+          // Le point de détour est inséré entre les bornes du segment pour
+          // que le lien Google Maps force réellement le passage par ce point
+          // (sinon Google Maps recalculerait son propre itinéraire direct).
+          stepAnchors: hasCongestedRanges
+            ? [alt.segmentStart, viaPoint, alt.segmentEnd].filter(Boolean)
+            : [legacyWaypoints?.[alt.viaIndex]].filter(Boolean),
+          source: 'osrm',
+          viaIndex: alt.viaIndex,
+          gainSeconds: alt.gainSeconds,
+        };
+      })
     );
   }
 
