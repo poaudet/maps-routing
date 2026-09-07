@@ -14,16 +14,48 @@ const { loadRegistry, DEFAULT_REGISTRY_PATH, findCorridorsForSegment } = require
 const {
   fetchRouteAlternatives,
   detectHighTraffic,
-  findCongestedLegRanges,
-  findCongestedStepRanges,
   findCongestedRanges,
 } = require('./src/routesApi');
 const { optimizeSegment, optionMatchesCorridor } = require('./src/optimizer');
 const { updateRegistry } = require('./src/learning');
-const { fetchAlternativesMatrix, rankMatrixAlternatives } = require('./src/osrm');
-const { resolvePlace, resolvePlaces } = require('./src/geocode');
+const { fetchAlternativesMatrix, rankMatrixAlternatives, fetchOsrmRouteAlternatives } = require('./src/osrm');
+const { resolvePlaces } = require('./src/geocode');
 const { debugLog } = require('./src/debug');
 const { buildGoogleMapsRouteUrl } = require('./src/mapsLink');
+
+/** Cap initial (degrés [0,360)) du point A vers le point B. */
+function bearingDeg(a, b) {
+  const toRad = (d) => (d * Math.PI) / 180;
+  const toDeg = (r) => (r * 180) / Math.PI;
+  const phi1 = toRad(a.lat);
+  const phi2 = toRad(b.lat);
+  const deltaLambda = toRad(b.lng - a.lng);
+  const y = Math.sin(deltaLambda) * Math.cos(phi2);
+  const x =
+    Math.cos(phi1) * Math.sin(phi2) -
+    Math.sin(phi1) * Math.cos(phi2) * Math.cos(deltaLambda);
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
+/** Déplace un point de distM mètres selon un cap donné (degrés). */
+function offsetLatLng(point, headingDeg, distM) {
+  const R = 6371000;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const toDeg = (r) => (r * 180) / Math.PI;
+  const delta = distM / R;
+  const theta = toRad(headingDeg);
+  const phi1 = toRad(point.lat);
+  const lambda1 = toRad(point.lng);
+  const phi2 = Math.asin(
+    Math.sin(phi1) * Math.cos(delta) + Math.cos(phi1) * Math.sin(delta) * Math.cos(theta)
+  );
+  const lambda2 =
+    lambda1 + Math.atan2(
+      Math.sin(theta) * Math.sin(delta) * Math.cos(phi1),
+      Math.cos(delta) - Math.sin(phi1) * Math.sin(phi2)
+    );
+  return { lat: toDeg(phi2), lng: ((toDeg(lambda2) + 540) % 360) - 180 };
+}
 
 /**
  * Évalue un segment entre deux points intermédiaires et retourne une réponse
@@ -77,6 +109,13 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
     throw new Error('Google Maps Routes API returned no routes for this segment');
   }
 
+  debugLog('planSegment', options, 'Intervalles de trafic', routes.map((r) => ({
+    description: r.description,
+    congestedIntervalCount: r.legs
+      .flatMap((l) => l.speedReadingIntervals)
+      .filter((i) => i.speed !== 'NORMAL').length,
+  })));
+
   // Détection de trafic élevé sur la route sélectionnable la plus rapide.
   const fastest = routes.reduce((best, route) =>
     route.durationSeconds < best.durationSeconds ? route : best
@@ -94,8 +133,63 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
   // matrixWaypoints ne doit pas élargir le calcul à un autre segment.
   let osrmAlternatives = null;
   let pool = routes.map((route) => ({ ...route, source: route.source ?? 'google' }));
+
+    // ---- Source 3 : découverte OSRM (route?alternatives=true), non conditionnée
+  // au trafic. OSRM propose des corridors distincts avec géométrie ; chaque
+  // survivant est rétarifié par Google (waypoint forcé) avant d'entrer dans
+  // le pool — jamais de durée OSRM brute dans l'optimiseur.
+  if (options.osrmDiscovery !== false) {
+    try {
+      const discoveries = await fetchOsrmRouteAlternatives(pointA, pointB, {
+        ...options,
+        baseUrl: options.osrmBaseUrl,
+        alternatives: options.osrmAlternativesCount ?? 3,
+      });
+      for (const [i, cand] of discoveries.entries()) {
+        if (!cand.midAnchor) continue;
+        const repriced = await fetchRouteAlternatives(pointA, pointB, {
+          ...options,
+          intermediates: [cand.midAnchor],
+        });
+        const priced = repriced[0];
+        if (!priced) continue;
+        pool.push({
+          index: pool.length,
+          description: `Alternative OSRM${i > 0 ? ` #${i + 1}` : ''}`,
+          durationSeconds: priced.durationSeconds,
+          staticDurationSeconds: priced.staticDurationSeconds,
+          distanceMeters: priced.distanceMeters,
+          polyline: priced.polyline,
+          stepAnchors: [cand.midAnchor],
+          source: 'osrm-discovery',
+        });
+      }
+    } catch (error) {
+      debugLog('planSegment', options, 'Découverte OSRM échouée (non bloquant)', {
+        error: error.message,
+      });
+    }
+  }
+
   if (traffic.congested) {
-    const congestedRanges = findCongestedRanges(fastest, options.congestionRatio);
+        const congestedRanges = findCongestedRanges(fastest, options.congestionRatio)
+      // Micro-plages (< minDelaySeconds de retard live) : jamais rentables à
+      // re-router — chaque plage coûte au moins une requête Google facturée.
+      .filter((r) => r.durationSeconds - r.staticDurationSeconds >= (options.minDelaySeconds ?? 60))
+      // Top-N par délai, sinon la pool inonde de micro-tronçons fantômes.
+      .sort(
+        (a, b) => (b.durationSeconds - b.staticDurationSeconds) -
+                  (a.durationSeconds - a.staticDurationSeconds)
+      )
+      .slice(0, options.maxRanges ?? 3);
+    debugLog('planSegment', options, 'Plages congestionnées détectées', {
+      count: congestedRanges.length,
+      ranges: congestedRanges.map((r) => ({
+        origin: r.origin ?? 'unknown',
+        start: r.start,
+        end: r.end,
+      })),
+    });
     const hasCongestedRanges = congestedRanges.length > 0;
     const reroutes = hasCongestedRanges
       ? congestedRanges
@@ -118,6 +212,81 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
       ? await resolvePlaces(options.matrixWaypoints, options)
       : [];
     for (const range of reroutes) {
+      // ---- Source 1 : détour sans autoroute du tronçon congestionné.
+      // Les bornes d'intervalle claquent sur la chaussée autoroutière :
+      // une requête posée SUR l'autoroute ignore avoidHighways (vérifié
+      // empiriquement — réponse « Autoroute 15 » à free-flow 105 km/h).
+      // On décale chaque borne perpendiculairement au corridor
+      // (jamLateralOffsetMeters, défaut 400 m), côté gauche puis droit :
+      // Google accroche alors une route locale, et le modificateur peut
+      // produire un vrai détour. Toute réponse encore autoroutière
+      // (description ou free-flow > 80 km/h) est rejetée.
+      if (hasCongestedRanges) {
+        let detourAccepted = false;
+        const jamBearing = bearingDeg(range.start, range.end);
+        const jamOffsetM = options.jamLateralOffsetMeters ?? 500;
+        for (const side of [-90, 90]) {
+          const qStart = offsetLatLng(range.start, jamBearing + side, jamOffsetM);
+          const qEnd = offsetLatLng(range.end, jamBearing + side, jamOffsetM);
+          let detourRoutes = [];
+          try {
+            detourRoutes = await fetchRouteAlternatives(qStart, qEnd, {
+              ...options,
+              routeModifiers: { avoidHighways: true },
+            });
+          } catch (error) {
+            debugLog('planSegment', options, 'Détour sans autoroute refusé', {
+              side: side === -90 ? 'gauche' : 'droit',
+              error: error.message,
+            });
+          }
+          const detour = detourRoutes[0];
+          const detourFreeFlowKmh =
+            detour && detour.distanceMeters > 0 && detour.staticDurationSeconds > 0
+              ? (detour.distanceMeters / detour.staticDurationSeconds) * 3.6
+              : 0;
+          const detourIsMotorway =
+            /autoroute|transcanadienne/i.test(detour?.description ?? '') ||
+            detourFreeFlowKmh > 80;
+          if (detour && !detourIsMotorway) {
+            const detourPts = detour.legs.flatMap((l) => l.points);
+            const detourAnchors = [0.25, 0.50, 0.75]
+              .map((f) => detourPts[Math.floor(detourPts.length * f)])
+              .filter(Boolean);
+            osrmAlternatives.push({
+              source: 'google-detour',
+              viaIndex: null,
+              segmentStart: range.start,
+              segmentEnd: range.end,
+              detourAnchors,
+              detourPolyline: detour.polyline,
+              detourDistanceMeters: detour.distanceMeters,
+              durationSeconds:
+                fastest.durationSeconds - range.durationSeconds + detour.durationSeconds,
+              staticDurationSeconds:
+                (fastest.staticDurationSeconds ?? 0) -
+                (range.staticDurationSeconds ?? 0) +
+                (detour.staticDurationSeconds ?? 0),
+              gainSeconds: range.durationSeconds - detour.durationSeconds,
+            });
+            debugLog('planSegment', options, 'Détour accepté', {
+              side: side === -90 ? 'gauche' : 'droit',
+              description: detour.description,
+              freeFlowKmh: Math.round(detourFreeFlowKmh),
+            });
+            detourAccepted = true;
+            break;
+          }
+          debugLog('planSegment', options, 'Détour ignoré (corridor autoroutier)', {
+            side: side === -90 ? 'gauche' : 'droit',
+            description: detour ? detour.description : null,
+            freeFlowKmh: Math.round(detourFreeFlowKmh),
+          });
+        }
+        if (detourAccepted) {
+          continue; // Google a fourni le détour : pas de matrice OSRM pour ce tronçon.
+        }
+      }
       const waypoints = hasCongestedRanges
         ? [range.start, range.end, ...extraVia]
         : [pointA, pointB, ...extraVia];
@@ -132,9 +301,9 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
       });
       const segmentAlternatives = rankMatrixAlternatives(matrix.durations, {
         ...options,
-        currentDurationSeconds: hasCongestedRanges
-          ? range.durationSeconds
-          : fastest.durationSeconds,
+         currentDurationSeconds: hasCongestedRanges
+          ? (range.staticDurationSeconds ?? range.durationSeconds)
+          : (fastest.staticDurationSeconds ?? fastest.durationSeconds),
         includeDirect: hasCongestedRanges,
       });
       osrmAlternatives.push(
@@ -153,6 +322,19 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
     }
     pool = pool.concat(
       osrmAlternatives.map((alt) => {
+        if (alt.source === 'google-detour') {
+          return {
+            index: pool.length,
+            description: 'Détour sans autoroute pour le tronçon congestionné',
+            durationSeconds: alt.durationSeconds,
+            staticDurationSeconds: alt.staticDurationSeconds,
+            distanceMeters: alt.detourDistanceMeters ?? null,
+            polyline: alt.detourPolyline,
+            stepAnchors: [alt.segmentStart, ...alt.detourAnchors, alt.segmentEnd].filter(Boolean),
+            source: 'google-detour',
+            gainSeconds: alt.gainSeconds,
+          };
+        }
         const viaPoint = alt.viaIndex !== null ? extraVia[alt.viaIndex - 2] : null;
         return {
           index: routes.length + alt.viaIndex,

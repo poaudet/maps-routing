@@ -10,7 +10,7 @@
  * distance et à la géométrie (polyline + étapes) nécessaire à l'appariement
  * des corridors du registre.
  */
-
+const { decodePolyline } = require('./decodePolyline');
 const { debugLog } = require('./debug');
 
 const ROUTES_API_URL = 'https://routes.googleapis.com/directions/v2:computeRoutes';
@@ -29,10 +29,8 @@ const FIELD_MASK = [
   'routes.legs.staticDuration',
   'routes.legs.startLocation',
   'routes.legs.endLocation',
-  'routes.legs.steps.duration',
-  'routes.legs.steps.endLocation',
-  'routes.legs.steps.startLocation',
-  'routes.legs.steps.staticDuration',
+  'routes.legs.polyline.encodedPolyline',
+  'routes.legs.travelAdvisory.speedReadingIntervals',
 ].join(',');
 
 function toLatLngLiteral(point) {
@@ -115,36 +113,11 @@ function normalizeLocation(location) {
 function normalizeRoute(route, index, origin) {
   let previousEnd = origin ?? null;
   const legs = (route.legs || []).map((leg, legIndex) => {
-    let legStart = normalizeLocation(leg.startLocation) || previousEnd;
-    const steps = (leg.steps || []).map((step, stepIndex) => {
-      const stepStart = normalizeLocation(step.startLocation) || (stepIndex === 0 ? legStart : null);
-      const stepEnd = normalizeLocation(step.endLocation);
-      return {
-        index: stepIndex,
-        start: stepStart,
-        end: stepEnd,
-        durationSeconds:
-          step.duration === undefined ? null : parseDurationSeconds(step.duration),
-        staticDurationSeconds:
-          step.staticDuration === undefined ? null : parseDurationSeconds(step.staticDuration),
-      };
-    });
-
-    if (steps[0] && !steps[0].start) {
-      steps[0].start = legStart;
-    }
-    for (let sIndex = 1; sIndex < steps.length; sIndex += 1) {
-      if (!steps[sIndex].start) steps[sIndex].start = steps[sIndex - 1].end;
-    }
-
-    if (!legStart && steps[0]?.start) {
-      legStart = steps[0].start;
-    }
-    const legEnd = normalizeLocation(leg.endLocation) || steps[steps.length - 1]?.end || null;
+    const legStart = normalizeLocation(leg.startLocation) || previousEnd;
+    const legEnd = normalizeLocation(leg.endLocation) || null;
     if (legEnd) {
       previousEnd = legEnd;
     }
-
     return {
       index: legIndex,
       start: legStart,
@@ -153,17 +126,13 @@ function normalizeRoute(route, index, origin) {
         leg.duration === undefined ? null : parseDurationSeconds(leg.duration),
       staticDurationSeconds:
         leg.staticDuration === undefined ? null : parseDurationSeconds(leg.staticDuration),
-      steps,
+      // Géométrie + densité de trafic de la leg (extraComputations TRAFFIC_ON_POLYLINE).
+      polyline: leg.polyline?.encodedPolyline ?? null,
+      speedReadingIntervals: leg.travelAdvisory?.speedReadingIntervals ?? [],
+      // Bornes locales pour findCongestedRangesFromIntervals.
+      points: leg.polyline?.encodedPolyline ? decodePolyline(leg.polyline.encodedPolyline) : [],
     };
   });
-
-  const steps = legs.flatMap((leg) => leg.steps);
-  if (steps[0] && !steps[0].start) {
-    steps[0].start = origin ?? null;
-  }
-  for (let sIndex = 1; sIndex < steps.length; sIndex += 1) {
-    if (!steps[sIndex].start) steps[sIndex].start = steps[sIndex - 1].end;
-  }
 
   return {
     index,
@@ -172,9 +141,8 @@ function normalizeRoute(route, index, origin) {
     staticDurationSeconds: parseDurationSeconds(route.staticDuration),
     distanceMeters: route.distanceMeters ?? null,
     polyline: route.polyline?.encodedPolyline ?? null,
-    stepAnchors: steps.map((step) => step.end).filter(Boolean),
+    stepAnchors: legs.map((leg) => leg.end).filter(Boolean),
     legs,
-    steps,
   };
 }
 
@@ -203,9 +171,14 @@ async function fetchRouteAlternatives(origin, destination, options = {}) {
   const body = {
     origin: toLatLngLiteral(origin),
     destination: toLatLngLiteral(destination),
+    ...(Array.isArray(options.intermediates) && options.intermediates.length > 0
+      ? { intermediates: options.intermediates.map(toLatLngLiteral) }
+      : {}),
     travelMode: 'DRIVE',
     routingPreference: 'TRAFFIC_AWARE',
     computeAlternativeRoutes: true,
+    extraComputations: ['TRAFFIC_ON_POLYLINE'],
+    ...(options.routeModifiers ? { routeModifiers: options.routeModifiers } : {}),
   };
 
   if (options.departureTime !== undefined && options.departureTime !== null) {
@@ -217,6 +190,8 @@ async function fetchRouteAlternatives(origin, destination, options = {}) {
     destination,
     fieldMask,
     departureTime: body.departureTime,
+    intermediates: body.intermediates,
+    routeModifiers: body.routeModifiers,
   });
 
   const response = await fetchImpl(ROUTES_API_URL, {
@@ -248,108 +223,96 @@ async function fetchRouteAlternatives(origin, destination, options = {}) {
   return routes;
 }
 
+/** Vitesses considérées comme congestionnées dans speedReadingIntervals. */
+const CONGESTED_SPEEDS = new Set(['SLOW', 'TRAFFIC_JAM']);
+
 /**
- * Regroupe les legs contigus dont le temps réel dépasse le seuil de trafic.
- * Chaque groupe fournit les bornes exactes du/des legs à réacheminer.
+ * Localise les plages congestionnées via les speedReadingIntervals de la leg
+ * (extraComputations: TRAFFIC_ON_POLYLINE). Les indices d'intervalle portent
+ * sur la polyligne de la leg ; la polyligne décodée fournit les coordonnées
+ * exactes des bornes. Durées réelle/free-flow allouées proportionnellement
+ * au nombre de points couverts.
+ *
+ * @returns {Array<{start, end, durationSeconds, staticDurationSeconds}>}
  */
-function findCongestedLegRanges(route, congestionRatio = DEFAULT_CONGESTION_RATIO) {
+function findCongestedRangesFromIntervals(route) {
   const ranges = [];
-  let current = null;
   for (const leg of route.legs || []) {
-    if (
-      !Number.isFinite(leg.durationSeconds) ||
-      !Number.isFinite(leg.staticDurationSeconds) ||
-      leg.staticDurationSeconds <= 0
-    ) {
-      if (current) ranges.push(current);
-      current = null;
+    const intervals = leg.speedReadingIntervals || [];
+    const points = leg.points || [];
+    if (intervals.length === 0 || points.length === 0) {
       continue;
     }
-    const congested =
-      (leg.durationSeconds - leg.staticDurationSeconds) / leg.staticDurationSeconds >
-      congestionRatio;
-    if (!congested) {
+    const legDuration = leg.durationSeconds ?? 0;
+    const legStatic = leg.staticDurationSeconds ?? 0;
+    const secondsPerPoint = legDuration > 0 ? legDuration / points.length : 0;
+    const staticPerPoint = legStatic > 0 ? legStatic / points.length : 0;
+
+    let current = null;
+    const flush = () => {
       if (current) ranges.push(current);
       current = null;
-      continue;
+    };
+    for (const interval of intervals) {
+      const startIndex = Math.min(interval.startPolylinePointIndex ?? 0, points.length - 1);
+      const endIndex = Math.min(interval.endPolylinePointIndex ?? startIndex, points.length - 1);
+      const pointCount = endIndex - startIndex + 1;
+      if (!CONGESTED_SPEEDS.has(interval.speed)) {
+        flush();
+        continue;
+      }
+      const start = points[startIndex];
+      const end = points[endIndex];
+      if (!start || !end) {
+        flush();
+        continue;
+      }
+      if (!current) {
+        current = {
+          start,
+          end,
+          durationSeconds: secondsPerPoint * pointCount,
+          staticDurationSeconds: staticPerPoint * pointCount,
+        };
+      } else {
+        current.end = end;
+        current.durationSeconds += secondsPerPoint * pointCount;
+        current.staticDurationSeconds += staticPerPoint * pointCount;
+      }
     }
-    const legStart = leg.start || leg.steps?.[0]?.start || null;
-    const legEnd = leg.end || leg.steps?.[leg.steps.length - 1]?.end || null;
-    if (!current) {
-      current = {
-        start: legStart,
-        end: legEnd,
-        durationSeconds: leg.durationSeconds,
-        staticDurationSeconds: leg.staticDurationSeconds,
-      };
-    } else {
-      current.end = legEnd || current.end;
-      current.durationSeconds += leg.durationSeconds;
-      current.staticDurationSeconds += leg.staticDurationSeconds;
-    }
+    flush();
   }
-  if (current) ranges.push(current);
   return ranges.filter((range) => range.start && range.end);
 }
 
 /**
- * Regroupe les étapes contiguës dont le temps réel dépasse le seuil de trafic.
- * Chaque groupe fournit les bornes exactes à réacheminer, plutôt qu'une
- * waypointMatrix globale.
- */
-function findCongestedStepRanges(route, congestionRatio = DEFAULT_CONGESTION_RATIO) {
-  const ranges = [];
-  let current = null;
-  for (const step of route.steps || []) {
-    if (
-      !Number.isFinite(step.durationSeconds) ||
-      !Number.isFinite(step.staticDurationSeconds) ||
-      step.staticDurationSeconds <= 0
-    ) {
-      if (current) ranges.push(current);
-      current = null;
-      continue;
-    }
-    const congested =
-      (step.durationSeconds - step.staticDurationSeconds) / step.staticDurationSeconds >
-      congestionRatio;
-    if (!congested) {
-      if (current) ranges.push(current);
-      current = null;
-      continue;
-    }
-    if (!current) {
-      current = {
-        start: step.start,
-        end: step.end,
-        durationSeconds: step.durationSeconds,
-        staticDurationSeconds: step.staticDurationSeconds,
-      };
-    } else {
-      current.end = step.end || current.end;
-      current.durationSeconds += step.durationSeconds;
-      current.staticDurationSeconds += step.staticDurationSeconds;
-    }
-  }
-  if (current) ranges.push(current);
-  return ranges.filter((range) => range.start && range.end);
-}
-
-/**
- * Détermine les plages congestionnées d'une route en considérant d'abord les
- * legs, puis avec repli (fallback) sur les steps si disponibles, ou retour vide
- * pour un repli sur l'ensemble du segment.
+ * Plages congestionnées d'une route : priorité aux speedReadingIntervals
+ * (données natives Google, aucune requête supplémentaire) ; repli sur le
+ * ratio global leg-level si les intervals sont indisponibles.
  */
 function findCongestedRanges(route, congestionRatio = DEFAULT_CONGESTION_RATIO) {
-  const legRanges = findCongestedLegRanges(route, congestionRatio);
-  if (legRanges.length > 0) {
-    return legRanges;
+  const intervalRanges = findCongestedRangesFromIntervals(route);
+  if (intervalRanges.length > 0) {
+    return intervalRanges.map((range) => ({ ...range, origin: 'intervals' }));
   }
-  const stepRanges = findCongestedStepRanges(route, congestionRatio);
-  if (stepRanges.length > 0) {
-    return stepRanges;
-  }
-  return [];
+  // Repli : legs entièrement congestionnées selon le ratio duration/static.
+  return (route.legs || [])
+    .filter(
+      (leg) =>
+        Number.isFinite(leg.durationSeconds) &&
+        Number.isFinite(leg.staticDurationSeconds) &&
+        leg.staticDurationSeconds > 0 &&
+        (leg.durationSeconds - leg.staticDurationSeconds) / leg.staticDurationSeconds >
+          congestionRatio &&
+        leg.start && leg.end
+    )
+    .map((leg) => ({
+      origin: 'leg-fallback',
+      start: leg.start,
+      end: leg.end,
+      durationSeconds: leg.durationSeconds,
+      staticDurationSeconds: leg.staticDurationSeconds,
+    }));
 }
 
 /**
@@ -375,8 +338,7 @@ module.exports = {
   toDepartureTimeString,
   normalizeRoute,
   detectHighTraffic,
-  findCongestedLegRanges,
-  findCongestedStepRanges,
+  findCongestedRangesFromIntervals,
   findCongestedRanges,
   fetchRouteAlternatives,
 };

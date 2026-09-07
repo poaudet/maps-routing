@@ -105,14 +105,23 @@ function optimizeSegment(routes, registry, segment, options = {}) {
     }
   }
 
-  const reason = 'Aucun corridor enregistré viable : sélection de la route la plus rapide.';
+  // Éligibilité à la RECOMMANDATION : une option sans géométrie (durée OSRM
+  // free-flow, jamais tarifée par Google) peut figurer dans la liste des
+  // alternatives mais jamais être retenue — le chiffre sur lequel l'utilisateur
+  // agit doit venir d'un tarif Google.
+  const selectable = candidates.filter((route) => route.polyline);
+  const selected = selectable.length > 0 ? selectable[0] : candidates[0];
+
+  const reason = selectable.length > 0
+    ? 'Aucun corridor enregistré viable : sélection de la route la plus rapide tarifiée par Google.'
+    : 'Aucune option tarifiée par Google : alternatives affichées sans recommandation.';
   debugLog('optimizer', options, 'Sélection de la route la plus rapide', {
-    selected: candidates[0].description,
-    durationSeconds: candidates[0].durationSeconds,
+    selected: selected.description,
+    durationSeconds: selected.durationSeconds,
     reason,
   });
   return {
-    selected: candidates[0],
+    selected,
     candidates,
     fastest,
     matchedCorridor: null,

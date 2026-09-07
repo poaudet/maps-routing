@@ -10,6 +10,7 @@
  */
 
 const { debugLog } = require('./debug');
+const { decodePolyline } = require('./decodePolyline');
 
 const DEFAULT_OSRM_BASE_URL = 'https://router.project-osrm.org';
 
@@ -128,8 +129,86 @@ function rankMatrixAlternatives(durations, options = {}) {
   return ranked;
 }
 
+/**
+ * Découverte d'itinéraires alternatifs via le service route d'OSRM
+ * (alternatives=true). Contrairement au service table, ce service ÉNUMÈRE
+ * de vraies routes distinctes avec géométrie — c'est le primitive de
+ * découverte d'OSRM. Les durées restent free-flow (aucune donnée de trafic) :
+ * à réтарifer via Google avant toute sélection.
+ *
+ * @param {{lat: number, lng: number}} origin
+ * @param {{lat: number, lng: number}} destination
+ * @param {object} [options]
+ * @param {string} [options.baseUrl] URL de base OSRM (ex. osrmBaseUrl utilisateur).
+ * @param {number} [options.alternatives] Nombre max d'alternatives (défaut 3).
+ * @param {typeof fetch} [options.fetchImpl]
+ * @returns {Promise<Array<{
+ *   durationSeconds: number,
+ *   distanceMeters: number,
+ *   points: Array<{lat: number, lng: number}>,
+ *   midAnchor: {lat: number, lng: number},
+ *   motorwayShare: number,
+ *   trafficLightsEstimate: number
+ * }>>}
+ */
+async function fetchOsrmRouteAlternatives(origin, destination, options = {}) {
+  if (!origin || !destination) {
+    throw new Error('fetchOsrmRouteAlternatives requires origin and destination');
+  }
+  const baseUrl = options.baseUrl ?? DEFAULT_OSRM_BASE_URL;
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const coords = `${toOsrmCoordinate(origin)};${toOsrmCoordinate(destination)}`;
+  const maxAlternatives = options.alternatives ?? 3;
+  const url =
+    `${baseUrl}/route/v1/driving/${coords}` +
+    `?alternatives=${maxAlternatives}&overview=full&geometries=polyline&steps=true`;
+  debugLog('osrm', options, 'Requête route (découverte)', { url });
+
+  const response = await fetchImpl(url);
+  if (!response.ok) {
+    const details = await response.text().catch(() => '');
+    debugLog('osrm', options, `Erreur API ${response.status}`, details);
+    throw new Error(`OSRM route API error ${response.status}: ${details}`);
+  }
+  const payload = await response.json();
+  debugLog('osrm', options, 'Réponse route', { code: payload.code, routes: payload.routes?.length });
+  if (payload.code !== 'Ok' || !Array.isArray(payload.routes)) {
+    throw new Error(`OSRM route API unexpected response: ${payload.code ?? 'no code'}`);
+  }
+
+    return payload.routes.map((route) => {
+    // geometries=polyline → précision 5, même codec que Google.
+    const points = decodePolyline(route.geometry);
+    const steps = (route.legs ?? []).flatMap((leg) => leg.steps ?? []);
+
+    // Caractère routier : part de la distance sur autoroute (classes OSM des
+    // intersections). Proxy "stress structurel" indépendant du trafic.
+    let motorwayDistance = 0;
+    let totalDistance = 0;
+    for (const step of steps) {
+      const stepDistance = step.distance ?? 0;
+      totalDistance += stepDistance;
+      const classes = (step.intersections ?? []).flatMap((i) => i.classes ?? []);
+      if (classes.includes('motorway')) {
+        motorwayDistance += stepDistance;
+      }
+    }
+
+    return {
+      durationSeconds: route.duration,
+      distanceMeters: route.distance,
+      points,
+      midAnchor: points[Math.floor(points.length / 2)] ?? null,
+      // motorwayShare retiré : le serveur public project-osrm.org n'émet pas
+      // le champ classes (vérifié empiriquement). Réintroduire avec un
+      // serveur OSRM auto-hébergé dont le profil expose les classes.
+    };
+  });
+}
+
 module.exports = {
   DEFAULT_OSRM_BASE_URL,
   fetchAlternativesMatrix,
   rankMatrixAlternatives,
+  fetchOsrmRouteAlternatives,
 };
