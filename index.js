@@ -10,7 +10,7 @@
  *  4. Apprentissage : boucle de rétroaction (src/learning.js)
  */
 
-const { loadRegistry, DEFAULT_REGISTRY_PATH, findCorridorsForSegment } = require('./src/registry');
+const { loadRegistry, DEFAULT_REGISTRY_PATH, findCorridorsForSegment, haversineMeters } = require('./src/registry');
 const {
   fetchRouteAlternatives,
   detectHighTraffic,
@@ -58,6 +58,40 @@ function offsetLatLng(point, headingDeg, distM) {
 }
 
 /**
+ * Fusionne les plages congestionnées consécutives séparées par un écart
+ * (segment à vitesse NORMALE) d'au plus `maxGapM` mètres entre la fin de
+ * l'une et le début de la suivante. Suppose que `ranges` arrive dans
+ * l'ordre de la route (vrai aujourd'hui : les intervalles sont ordonnés
+ * par leg, les legs sont dans l'ordre) — DOIT être appelé avant tout tri
+ * par délai, sous peine de fusionner des plages non adjacentes sur la route.
+ *
+ * Ne mute jamais les objets d'entrée : chaque plage émise (fusionnée ou
+ * non) est une copie fraîche, donc un appel répété sur le même tableau
+ * `ranges` reste sans effet de bord et produit toujours le même résultat.
+ *
+ * @param {Array<{start: object, end: object, durationSeconds: number, staticDurationSeconds: number}>} ranges
+ * @param {number} maxGapM Écart maximal (mètres) entre deux plages pour les fusionner.
+ * @returns {Array<object>} Plages fusionnées, toujours dans l'ordre de la route.
+ */
+function mergeNearbyRanges(ranges, maxGapM) {
+  if (!Array.isArray(ranges) || ranges.length === 0) {
+    return [];
+  }
+  const merged = [];
+  for (const range of ranges) {
+    const previous = merged[merged.length - 1];
+    if (previous && haversineMeters(previous.end, range.start) <= maxGapM) {
+      previous.end = range.end;
+      previous.durationSeconds += range.durationSeconds;
+      previous.staticDurationSeconds += range.staticDurationSeconds;
+    } else {
+      merged.push({ ...range });
+    }
+  }
+  return merged;
+}
+
+/**
  * Évalue un segment entre deux points intermédiaires et retourne une réponse
  * JSON structurée : la route recommandée (`recommended`, privilégiant les
  * corridors connus de l'utilisateur) et la liste des `alternatives` entre
@@ -79,6 +113,8 @@ function offsetLatLng(point, headingDeg, distM) {
  * @param {string} [options.registryPath] Chemin du fichier route-cache.json.
  * @param {number} [options.toleranceRatio] Budget de tolérance flou (défaut : 0.05).
  * @param {number} [options.congestionRatio] Seuil de trafic élevé (défaut : 0.25).
+ * @param {number} [options.mergeRangeGapMeters] Écart max. (m) pour fusionner
+ *   deux plages congestionnées proches avant filtrage (défaut : 500).
  * @param {Array<{lat: number, lng: number}|{name: string}|string>} [options.matrixWaypoints]
  *   Points intermédiaires pour la matrice OSRM (défaut : [pointA, pointB]) ;
  *   les noms de lieux y sont aussi résolus. Lorsqu'une plage d'étapes Google
@@ -172,7 +208,13 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
   }
 
   if (traffic.congested) {
-        const congestedRanges = findCongestedRanges(fastest, options.congestionRatio)
+    const congestedRanges = mergeNearbyRanges(
+      // Fusion AVANT tri : les plages sortent de findCongestedRanges dans
+      // l'ordre de la route ; trier par délai avant de fusionner casserait
+      // cette hypothèse d'adjacence.
+      findCongestedRanges(fastest, options.congestionRatio),
+      options.mergeRangeGapMeters ?? 500
+    )
       // Micro-plages (< minDelaySeconds de retard live) : jamais rentables à
       // re-router — chaque plage coûte au moins une requête Google facturée.
       .filter((r) => r.durationSeconds - r.staticDurationSeconds >= (options.minDelaySeconds ?? 60))
@@ -217,12 +259,21 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
       // une requête posée SUR l'autoroute ignore avoidHighways (vérifié
       // empiriquement — réponse « Autoroute 15 » à free-flow 105 km/h).
       // On décale chaque borne perpendiculairement au corridor
-      // (jamLateralOffsetMeters, défaut 400 m), côté gauche puis droit :
+      // (jamLateralOffsetMeters, défaut 500 m), côté gauche puis droit :
       // Google accroche alors une route locale, et le modificateur peut
       // produire un vrai détour. Toute réponse encore autoroutière
       // (description ou free-flow > 80 km/h) est rejetée.
       if (hasCongestedRanges) {
         let detourAccepted = false;
+        const mergedRanges = mergeNearbyRanges(
+            findCongestedRanges(fastest, options.congestionRatio),
+            options.mergeRangeGapMeters ?? 500
+          );
+        const congestedRanges = mergedRanges
+          .filter((r) => r.durationSeconds - r.staticDurationSeconds >= (options.minDelaySeconds ?? 60))
+          .sort(/* unchanged */ (a, b) => (b.durationSeconds - b.staticDurationSeconds) - (a.durationSeconds - a.staticDurationSeconds))
+          .slice(0, options.maxRanges ?? 3);
+        const rangeOrder = mergedRanges.indexOf(range); // Tâche 2 : position le long de la baseline.
         const jamBearing = bearingDeg(range.start, range.end);
         const jamOffsetM = options.jamLateralOffsetMeters ?? 500;
         for (const side of [-90, 90]) {
@@ -267,7 +318,8 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
                 (fastest.staticDurationSeconds ?? 0) -
                 (range.staticDurationSeconds ?? 0) +
                 (detour.staticDurationSeconds ?? 0),
-              gainSeconds: range.durationSeconds - detour.durationSeconds,
+                  gainSeconds: range.durationSeconds - detour.durationSeconds,
+              rangeOrder,
             });
             debugLog('planSegment', options, 'Détour accepté', {
               side: side === -90 ? 'gauche' : 'droit',
@@ -322,6 +374,21 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
     }
     pool = pool.concat(
       osrmAlternatives.map((alt) => {
+        if (alt.source === 'google-detour-combined') {
+          return {
+            index: pool.length,
+            description:
+              `Détours combinés sans autoroute pour ${alt.combinedCount} tronçons congestionnés ` +
+              `(délai évité : ${Math.round(alt.gainSeconds)} s)`,
+            durationSeconds: alt.durationSeconds,
+            staticDurationSeconds: alt.staticDurationSeconds,
+            distanceMeters: null,
+            polyline: null,
+            stepAnchors: alt.stepAnchors,
+            source: 'google-detour-combined',
+            gainSeconds: alt.gainSeconds,
+          };
+        }
         if (alt.source === 'google-detour') {
           return {
             index: pool.length,
@@ -359,6 +426,34 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
       })
     );
   }
+
+      // Tâche 2 : entrée combinée Tier 1. Si ≥ 2 détours Google acceptés sur
+    // cette baseline, une seule entrée pool supplémentaire les combine —
+    // pure arithmétique sur des prix déjà facturés (aucun appel réseau
+    // supplémentaire). Seules les sources google-detour se combinent : un
+    // repli matrice OSRM n'a pas de prix Google fiable pour ce tronçon.
+    const acceptedDetours = osrmAlternatives
+      .filter((alt) => alt.source === 'google-detour')
+      .sort((a, b) => a.rangeOrder - b.rangeOrder);
+
+    if (acceptedDetours.length >= 2) {
+      const totalGainSeconds = acceptedDetours.reduce((sum, d) => sum + d.gainSeconds, 0);
+      const combinedStepAnchors = acceptedDetours
+        .flatMap((d) => [d.segmentStart, ...d.detourAnchors, d.segmentEnd])
+        .filter(Boolean);
+      osrmAlternatives.push({
+        source: 'google-detour-combined',
+        combinedCount: acceptedDetours.length,
+        stepAnchors: combinedStepAnchors,
+        durationSeconds: fastest.durationSeconds - totalGainSeconds,
+        staticDurationSeconds: null, // pas de formule fournie pour le static combiné
+        gainSeconds: totalGainSeconds,
+      });
+      debugLog('planSegment', options, 'Détours combinés (Tier 1)', {
+        count: acceptedDetours.length,
+        totalGainSeconds,
+      });
+    }
 
   // Lien Google Maps forçant les waypoints d'une option (stepAnchors ou
   // ancrage de corridor) : garantit que l'itinéraire ouvert par l'utilisateur
@@ -415,9 +510,9 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
       // par l'utilisateur correspond exactement à cette option (et non à un
       // itinéraire recalculé par Google Maps entre pointA et pointB).
       googleMapsUrl: googleMapsUrlFor(route.stepAnchors),
-      ...(route.source === 'osrm'
-        ? { viaIndex: route.viaIndex, gainSeconds: route.gainSeconds }
-        : {}),
+      ...(route.source === 'osrm' ? { viaIndex: route.viaIndex } : {}),
+      ...(route.gainSeconds !== undefined ? { gainSeconds: route.gainSeconds } : {}),
+      ...(route.source === 'google-detour-combined' ? { combinedCount: route.combinedCount } : {}),
     }))
     .sort((a, b) => (a.durationSeconds ?? Infinity) - (b.durationSeconds ?? Infinity))
     .concat(
