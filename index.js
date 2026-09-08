@@ -208,22 +208,14 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
   }
 
   if (traffic.congested) {
-    const congestedRanges = mergeNearbyRanges(
-      // Fusion AVANT tri : les plages sortent de findCongestedRanges dans
-      // l'ordre de la route ; trier par délai avant de fusionner casserait
-      // cette hypothèse d'adjacence.
+    const mergedRanges = mergeNearbyRanges(
       findCongestedRanges(fastest, options.congestionRatio),
       options.mergeRangeGapMeters ?? 500
-    )
-      // Micro-plages (< minDelaySeconds de retard live) : jamais rentables à
-      // re-router — chaque plage coûte au moins une requête Google facturée.
-      .filter((r) => r.durationSeconds - r.staticDurationSeconds >= (options.minDelaySeconds ?? 60))
-      // Top-N par délai, sinon la pool inonde de micro-tronçons fantômes.
-      .sort(
-        (a, b) => (b.durationSeconds - b.staticDurationSeconds) -
-                  (a.durationSeconds - a.staticDurationSeconds)
-      )
-      .slice(0, options.maxRanges ?? 3);
+    );
+    const congestedRanges = mergedRanges
+          .filter((r) => r.durationSeconds - r.staticDurationSeconds >= (options.minDelaySeconds ?? 60))
+          .sort(/* unchanged */ (a, b) => (b.durationSeconds - b.staticDurationSeconds) - (a.durationSeconds - a.staticDurationSeconds))
+          .slice(0, options.maxRanges ?? 3);
     debugLog('planSegment', options, 'Plages congestionnées détectées', {
       count: congestedRanges.length,
       ranges: congestedRanges.map((r) => ({
@@ -265,14 +257,6 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
       // (description ou free-flow > 80 km/h) est rejetée.
       if (hasCongestedRanges) {
         let detourAccepted = false;
-        const mergedRanges = mergeNearbyRanges(
-            findCongestedRanges(fastest, options.congestionRatio),
-            options.mergeRangeGapMeters ?? 500
-          );
-        const congestedRanges = mergedRanges
-          .filter((r) => r.durationSeconds - r.staticDurationSeconds >= (options.minDelaySeconds ?? 60))
-          .sort(/* unchanged */ (a, b) => (b.durationSeconds - b.staticDurationSeconds) - (a.durationSeconds - a.staticDurationSeconds))
-          .slice(0, options.maxRanges ?? 3);
         const rangeOrder = mergedRanges.indexOf(range); // Tâche 2 : position le long de la baseline.
         const jamBearing = bearingDeg(range.start, range.end);
         const jamOffsetM = options.jamLateralOffsetMeters ?? 500;
