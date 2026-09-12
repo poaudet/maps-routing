@@ -58,6 +58,33 @@ function offsetLatLng(point, headingDeg, distM) {
 }
 
 /**
+ * Distance (haversine) d'un point à un segment de ligne.
+ * Approxime en calculant la distance au point de segment le plus proche
+ * (start, end, ou milieu).
+ */
+function distancePointToSegment(pt, segStart, segEnd) {
+  const mid = {
+    lat: (segStart.lat + segEnd.lat) / 2,
+    lng: (segStart.lng + segEnd.lng) / 2,
+  };
+  return Math.min(
+    haversineMeters(pt, segStart),
+    haversineMeters(pt, segEnd),
+    haversineMeters(pt, mid)
+  );
+}
+
+/**
+ * Vrai si le point tombe à l'intérieur du corridor du bouchon
+ * (segment de range.start à range.end + buffer latéral).
+ * Exclut les waypoints qui risqueraient de ramener la route vers le bouchon.
+ */
+function isPointInJamCorridor(pt, jamStart, jamEnd, bufferMeters = 200) {
+  const distToSegment = distancePointToSegment(pt, jamStart, jamEnd);
+  return distToSegment <= bufferMeters;
+}
+
+/**
  * Fusionne les plages congestionnées consécutives séparées par un écart
  * (segment à vitesse NORMALE) d'au plus `maxGapM` mètres entre la fin de
  * l'une et le début de la suivante. Suppose que `ranges` arrive dans
@@ -115,6 +142,13 @@ function mergeNearbyRanges(ranges, maxGapM) {
  * @param {number} [options.congestionRatio] Seuil de trafic élevé (défaut : 0.25).
  * @param {number} [options.mergeRangeGapMeters] Écart max. (m) pour fusionner
  *   deux plages congestionnées proches avant filtrage (défaut : 500).
+ * @param {number} [options.jamLateralOffsetMeters] Décalage latéral (m) pour
+ *   trouver le détour perpendiculairement au corridor (défaut : 500).
+ * @param {number} [options.jamCorridorBufferMeters] Rayon de sécurité (m)
+ *   autour du bouchon pour exclure les waypoints du détour (défaut : 200).
+ * @param {Array<number>} [options.detourWaypointFractions] Positions (0–1)
+ *   le long de la polyligne du détour pour placer les waypoints forcés
+ *   (défaut : [0.25, 0.50, 0.75]). Ex. [0.33, 0.67] pour urbain.
  * @param {Array<{lat: number, lng: number}|{name: string}|string>} [options.matrixWaypoints]
  *   Points intermédiaires pour la matrice OSRM (défaut : [pointA, pointB]) ;
  *   les noms de lieux y sont aussi résolus. Lorsqu'une plage d'étapes Google
@@ -170,7 +204,7 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
   let osrmAlternatives = null;
   let pool = routes.map((route) => ({ ...route, source: route.source ?? 'google' }));
 
-    // ---- Source 3 : découverte OSRM (route?alternatives=true), non conditionnée
+  // ---- Source 3 : découverte OSRM (route?alternatives=true), non conditionnée
   // au trafic. OSRM propose des corridors distincts avec géométrie ; chaque
   // survivant est rétarifié par Google (waypoint forcé) avant d'entrer dans
   // le pool — jamais de durée OSRM brute dans l'optimiseur.
@@ -210,12 +244,18 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
   if (traffic.congested) {
     const mergedRanges = mergeNearbyRanges(
       findCongestedRanges(fastest, options.congestionRatio),
-      options.mergeRangeGapMeters ?? 500
+      options.mergeRangeGapMeters ?? 1000 //500
     );
     const congestedRanges = mergedRanges
-          .filter((r) => r.durationSeconds - r.staticDurationSeconds >= (options.minDelaySeconds ?? 60))
-          .sort(/* unchanged */ (a, b) => (b.durationSeconds - b.staticDurationSeconds) - (a.durationSeconds - a.staticDurationSeconds))
-          .slice(0, options.maxRanges ?? 3);
+      // Micro-plages (< minDelaySeconds de retard live) : jamais rentables à
+      // re-router — chaque plage coûte au moins une requête Google facturée.
+      .filter((r) => r.durationSeconds - r.staticDurationSeconds >= (options.minDelaySeconds ?? 60))
+      // Top-N par délai, sinon la pool inonde de micro-tronçons fantômes.
+      .sort(
+        (a, b) => (b.durationSeconds - b.staticDurationSeconds) -
+          (a.durationSeconds - a.staticDurationSeconds)
+      )
+      .slice(0, options.maxRanges ?? 3);
     debugLog('planSegment', options, 'Plages congestionnées détectées', {
       count: congestedRanges.length,
       ranges: congestedRanges.map((r) => ({
@@ -228,12 +268,12 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
     const reroutes = hasCongestedRanges
       ? congestedRanges
       : [
-          {
-            start: null,
-            end: null,
-            durationSeconds: fastest.durationSeconds,
-          },
-        ];
+        {
+          start: null,
+          end: null,
+          durationSeconds: fastest.durationSeconds,
+        },
+      ];
     osrmAlternatives = [];
     let legacyWaypoints = null;
     // Candidats de détour résolus une seule fois, réutilisés pour chaque
@@ -259,7 +299,7 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
         let detourAccepted = false;
         const rangeOrder = mergedRanges.indexOf(range); // Tâche 2 : position le long de la baseline.
         const jamBearing = bearingDeg(range.start, range.end);
-        const jamOffsetM = options.jamLateralOffsetMeters ?? 500;
+        const jamOffsetM = options.jamLateralOffsetMeters ?? 1000 //500;
         for (const side of [-90, 90]) {
           const qStart = offsetLatLng(range.start, jamBearing + side, jamOffsetM);
           const qEnd = offsetLatLng(range.end, jamBearing + side, jamOffsetM);
@@ -285,9 +325,10 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
             detourFreeFlowKmh > 80;
           if (detour && !detourIsMotorway) {
             const detourPts = detour.legs.flatMap((l) => l.points);
-            const detourAnchors = [0.25, 0.50, 0.75]
+            const detourAnchors = (options.detourWaypointFractions ?? [0.25, 0.50, 0.75])
               .map((f) => detourPts[Math.floor(detourPts.length * f)])
-              .filter(Boolean);
+              .filter(Boolean)
+              .filter((pt) => !isPointInJamCorridor(pt, range.start, range.end, options.jamCorridorBufferMeters ?? 200));
             osrmAlternatives.push({
               source: 'google-detour',
               viaIndex: null,
@@ -302,7 +343,7 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
                 (fastest.staticDurationSeconds ?? 0) -
                 (range.staticDurationSeconds ?? 0) +
                 (detour.staticDurationSeconds ?? 0),
-                  gainSeconds: range.durationSeconds - detour.durationSeconds,
+              gainSeconds: range.durationSeconds - detour.durationSeconds,
               rangeOrder,
             });
             debugLog('planSegment', options, 'Détour accepté', {
@@ -337,7 +378,7 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
       });
       const segmentAlternatives = rankMatrixAlternatives(matrix.durations, {
         ...options,
-         currentDurationSeconds: hasCongestedRanges
+        currentDurationSeconds: hasCongestedRanges
           ? (range.staticDurationSeconds ?? range.durationSeconds)
           : (fastest.staticDurationSeconds ?? fastest.durationSeconds),
         includeDirect: hasCongestedRanges,
@@ -347,15 +388,44 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
           ...alt,
           ...(hasCongestedRanges
             ? {
-                segmentStart: range.start,
-                segmentEnd: range.end,
-                durationSeconds:
-                  fastest.durationSeconds - range.durationSeconds + alt.durationSeconds,
-              }
+              segmentStart: range.start,
+              segmentEnd: range.end,
+              durationSeconds:
+                fastest.durationSeconds - range.durationSeconds + alt.durationSeconds,
+            }
             : {}),
         }))
       );
     }
+
+    // Tâche 2 : entrée combinée Tier 1. Si ≥ 2 détours Google acceptés sur
+    // cette baseline, une seule entrée pool supplémentaire les combine —
+    // pure arithmétique sur des prix déjà facturés (aucun appel réseau
+    // supplémentaire). Seules les sources google-detour se combinent : un
+    // repli matrice OSRM n'a pas de prix Google fiable pour ce tronçon.
+    const acceptedDetours = osrmAlternatives
+      .filter((alt) => alt.source === 'google-detour')
+      .sort((a, b) => a.rangeOrder - b.rangeOrder);
+
+    if (acceptedDetours.length >= 2) {
+      const totalGainSeconds = acceptedDetours.reduce((sum, d) => sum + d.gainSeconds, 0);
+      const combinedStepAnchors = acceptedDetours
+        .flatMap((d) => [d.segmentStart, ...d.detourAnchors, d.segmentEnd])
+        .filter(Boolean);
+      osrmAlternatives.push({
+        source: 'google-detour-combined',
+        combinedCount: acceptedDetours.length,
+        stepAnchors: combinedStepAnchors,
+        durationSeconds: fastest.durationSeconds - totalGainSeconds,
+        staticDurationSeconds: null, // pas de formule fournie pour le static combiné
+        gainSeconds: totalGainSeconds,
+      });
+      debugLog('planSegment', options, 'Détours combinés (Tier 1)', {
+        count: acceptedDetours.length,
+        totalGainSeconds,
+      });
+    }
+
     pool = pool.concat(
       osrmAlternatives.map((alt) => {
         if (alt.source === 'google-detour-combined') {
@@ -376,7 +446,10 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
         if (alt.source === 'google-detour') {
           return {
             index: pool.length,
-            description: 'Détour sans autoroute pour le tronçon congestionné',
+            description:
+                alt.detourAnchors.length > 0
+                  ? 'Détour sans autoroute pour le tronçon congestionné'
+                  : 'Détour sans autoroute (route libre, pas de waypoint)',
             durationSeconds: alt.durationSeconds,
             staticDurationSeconds: alt.staticDurationSeconds,
             distanceMeters: alt.detourDistanceMeters ?? null,
@@ -410,34 +483,6 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
       })
     );
   }
-
-      // Tâche 2 : entrée combinée Tier 1. Si ≥ 2 détours Google acceptés sur
-    // cette baseline, une seule entrée pool supplémentaire les combine —
-    // pure arithmétique sur des prix déjà facturés (aucun appel réseau
-    // supplémentaire). Seules les sources google-detour se combinent : un
-    // repli matrice OSRM n'a pas de prix Google fiable pour ce tronçon.
-    const acceptedDetours = osrmAlternatives
-      .filter((alt) => alt.source === 'google-detour')
-      .sort((a, b) => a.rangeOrder - b.rangeOrder);
-
-    if (acceptedDetours.length >= 2) {
-      const totalGainSeconds = acceptedDetours.reduce((sum, d) => sum + d.gainSeconds, 0);
-      const combinedStepAnchors = acceptedDetours
-        .flatMap((d) => [d.segmentStart, ...d.detourAnchors, d.segmentEnd])
-        .filter(Boolean);
-      osrmAlternatives.push({
-        source: 'google-detour-combined',
-        combinedCount: acceptedDetours.length,
-        stepAnchors: combinedStepAnchors,
-        durationSeconds: fastest.durationSeconds - totalGainSeconds,
-        staticDurationSeconds: null, // pas de formule fournie pour le static combiné
-        gainSeconds: totalGainSeconds,
-      });
-      debugLog('planSegment', options, 'Détours combinés (Tier 1)', {
-        count: acceptedDetours.length,
-        totalGainSeconds,
-      });
-    }
 
   // Lien Google Maps forçant les waypoints d'une option (stepAnchors ou
   // ancrage de corridor) : garantit que l'itinéraire ouvert par l'utilisateur

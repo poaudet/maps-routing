@@ -119,9 +119,10 @@ function createServer(options = {}) {
         });
         return;
       }
-      const {
+            const {
         pointA,
         pointB,
+        apiKey,
         matrixWaypoints,
         toleranceRatio,
         congestionRatio,
@@ -130,9 +131,16 @@ function createServer(options = {}) {
         geocodeBaseUrl,
         departureTime,
         debug,
+        mergeRangeGapMeters,
+        minDelaySeconds,
+        maxRanges,
+        jamLateralOffsetMeters,
+        jamCorridorBufferMeters,
+        detourWaypointFractions,
       } = body;
       const callOptions = {
         ...options,
+        ...(apiKey ? { apiKey } : {}),
         matrixWaypoints,
         toleranceRatio,
         congestionRatio,
@@ -141,6 +149,12 @@ function createServer(options = {}) {
         geocodeBaseUrl,
         departureTime,
         debug: debug ?? options.debug,
+        mergeRangeGapMeters,
+        minDelaySeconds,
+        maxRanges,
+        jamLateralOffsetMeters,
+        jamCorridorBufferMeters,
+        detourWaypointFractions,
       };
       const result = await planSegment(pointA, pointB, callOptions);
       consoleLogPlan(result);

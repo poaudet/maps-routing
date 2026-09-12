@@ -102,6 +102,11 @@ const WEB_PAGE = `<!DOCTYPE html>
     <summary>Options avancées (toutes les options de POST /plan)</summary>
     <div class="grid">
       <div>
+        <label for="apiKey">Clé API Google Maps</label>
+        <input id="apiKey" name="apiKey" type="password" placeholder="AIza..." size="40">
+        <div class="hint">Clé API (défaut : variable d'env GOOGLE_MAPS_API_KEY).</div>
+      </div>
+      <div>
         <label for="toleranceRatio">Tolérance (ratio)</label>
         <input id="toleranceRatio" name="toleranceRatio" type="number" step="0.01" min="0" placeholder="0.05">
         <div class="hint">Budget de tolérance flou (défaut : 0.05 = +5 %).</div>
@@ -140,7 +145,37 @@ const WEB_PAGE = `<!DOCTYPE html>
         <label class="checkbox" for="debug"><input id="debug" name="debug" type="checkbox"> Journal de débogage</label>
         <div class="hint">Active le journal de débogage de chaque couche (console serveur).</div>
       </div>
-    </div>
+      <div>
+        <label for="mergeRangeGapMeters">Gap de fusion (m)</label>
+        <input id="mergeRangeGapMeters" name="mergeRangeGapMeters" type="number" step="1" min="0" placeholder="500">
+        <div class="hint">Écart max pour fusionner deux plages congestionnées (défaut : 500 m).</div>
+      </div>
+      <div>
+        <label for="minDelaySeconds">Délai minimal (s)</label>
+        <input id="minDelaySeconds" name="minDelaySeconds" type="number" step="1" min="0" placeholder="60">
+        <div class="hint">Délai minimal pour traiter une plage (défaut : 60 s).</div>
+      </div>
+      <div>
+        <label for="maxRanges">Plages max</label>
+        <input id="maxRanges" name="maxRanges" type="number" step="1" min="1" placeholder="3">
+        <div class="hint">Nombre maximal de plages à traiter (défaut : 3).</div>
+      </div>
+      <div>
+        <label for="jamLateralOffsetMeters">Décalage latéral du détour (m)</label>
+        <input id="jamLateralOffsetMeters" name="jamLateralOffsetMeters" type="number" step="1" min="0" placeholder="500">
+        <div class="hint">Distance de décalage perpendiculaire pour trouver le détour (défaut : 500 m).</div>
+      </div>
+      <div>
+        <label for="jamCorridorBufferMeters">Rayon du corridor du bouchon (m)</label>
+        <input id="jamCorridorBufferMeters" name="jamCorridorBufferMeters" type="number" step="1" min="0" placeholder="200">
+        <div class="hint">Rayon de sécurité autour du bouchon pour exclure les waypoints (défaut : 200 m).</div>
+      </div>
+      <div>
+        <label for="detourWaypointFractions">Fractions de waypoints du détour</label>
+        <input id="detourWaypointFractions" name="detourWaypointFractions" type="text" placeholder="0.25, 0.5, 0.75" size="30">
+        <div class="hint">Positions (0–1) le long du détour, séparées par des virgules. Ex. 0.33, 0.67 pour urbain.</div>
+      </div>
+      </div>
   </details>
   <div><button id="submit" type="submit">Planifier</button></div>
 </form>
@@ -195,11 +230,31 @@ function buildPlanRequest() {
     pointA: parsePoint(document.getElementById('pointA').value),
     pointB: parsePoint(document.getElementById('pointB').value),
   };
+  // API key (optional, uses server-side env default if empty)
+  const apiKey = document.getElementById('apiKey').value.trim();
+  if (apiKey) body.apiKey = apiKey;
+
   const matrixWaypoints = parseWaypoints(document.getElementById('matrixWaypoints').value);
   if (matrixWaypoints) body.matrixWaypoints = matrixWaypoints;
   for (const key of ['toleranceRatio', 'congestionRatio', 'anchorToleranceMeters']) {
     const value = parseOptionalNumber(key);
     if (value !== undefined) body[key] = value;
+  }
+      // Nouveaux paramètres de détour
+  for (const key of ['mergeRangeGapMeters', 'minDelaySeconds', 'maxRanges', 'jamLateralOffsetMeters', 'jamCorridorBufferMeters']) {
+    const value = parseOptionalNumber(key);
+    if (value !== undefined) body[key] = value;
+  }
+
+  // Fractions de waypoints (virgule-séparées)
+  const fractionsRaw = document.getElementById('detourWaypointFractions').value.trim();
+  if (fractionsRaw) {
+    const fractions = fractionsRaw
+      .split(',')
+      .map((s) => parseFloat(s.trim()))
+      .filter((n) => Number.isFinite(n) && n > 0 && n < 1)
+      .sort((a, b) => a - b);
+    if (fractions.length > 0) body.detourWaypointFractions = fractions;
   }
   for (const key of ['osrmBaseUrl', 'geocodeBaseUrl']) {
     const value = parseOptionalText(key);
