@@ -31,6 +31,9 @@ const FIELD_MASK = [
   'routes.legs.endLocation',
   'routes.legs.polyline.encodedPolyline',
   'routes.legs.travelAdvisory.speedReadingIntervals',
+  'routes.legs.steps.navigationInstruction.maneuver',
+  'routes.legs.steps.startLocation',
+  'routes.legs.steps.endLocation',
 ].join(',');
 
 function toLatLngLiteral(point) {
