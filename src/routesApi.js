@@ -134,6 +134,18 @@ function normalizeRoute(route, index, origin) {
       speedReadingIntervals: leg.travelAdvisory?.speedReadingIntervals ?? [],
       // Bornes locales pour findCongestedRangesFromIntervals.
       points: leg.polyline?.encodedPolyline ? decodePolyline(leg.polyline.encodedPolyline) : [],
+      // Étapes normalisées (bornes + maneuver) : support de la classification
+      // autoroute/non-autoroute par plage congestionnée. Aucune géométrie par
+      // étape (non demandée dans FIELD_MASK) : seules les bornes {lat,lng} et
+      // le maneuver sont disponibles — le rattachement plage→étape se fait
+      // par proximité géographique, pas par index de polyligne (les étapes
+      // n'exposent aucun index de ce type, contrairement aux speedReadingIntervals).
+      steps: (leg.steps || []).map((step, stepIndex) => ({
+        index: stepIndex,
+        start: normalizeLocation(step.startLocation),
+        end: normalizeLocation(step.endLocation),
+        maneuver: step.navigationInstruction?.maneuver ?? null,
+      })),
     };
   });
 
@@ -276,6 +288,7 @@ function findCongestedRangesFromIntervals(route) {
           end,
           durationSeconds: secondsPerPoint * pointCount,
           staticDurationSeconds: staticPerPoint * pointCount,
+          leg,
         };
       } else {
         current.end = end;
@@ -315,6 +328,7 @@ function findCongestedRanges(route, congestionRatio = DEFAULT_CONGESTION_RATIO) 
       end: leg.end,
       durationSeconds: leg.durationSeconds,
       staticDurationSeconds: leg.staticDurationSeconds,
+      leg
     }));
 }
 
