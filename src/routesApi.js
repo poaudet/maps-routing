@@ -286,12 +286,15 @@ function findCongestedRangesFromIntervals(route) {
         current = {
           start,
           end,
+          startIndex,
+          endIndex,
           durationSeconds: secondsPerPoint * pointCount,
           staticDurationSeconds: staticPerPoint * pointCount,
           leg,
         };
       } else {
         current.end = end;
+        current.endIndex = endIndex;
         current.durationSeconds += secondsPerPoint * pointCount;
         current.staticDurationSeconds += staticPerPoint * pointCount;
       }
@@ -326,9 +329,11 @@ function findCongestedRanges(route, congestionRatio = DEFAULT_CONGESTION_RATIO) 
       origin: 'leg-fallback',
       start: leg.start,
       end: leg.end,
+      startIndex: 0,
+      endIndex: (leg.points?.length ?? 1) - 1,
       durationSeconds: leg.durationSeconds,
       staticDurationSeconds: leg.staticDurationSeconds,
-      leg
+      leg,
     }));
 }
 
