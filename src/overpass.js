@@ -243,4 +243,4 @@ async function findHighwayExit(target, routePoints, direction, options = {}) {
   return best ?? null;
 }
 
-module.exports = { DEFAULT_OVERPASS_URL, findHighwayExit };
+module.exports = { DEFAULT_OVERPASS_URL, findHighwayExit, findNearestRouteIndex };

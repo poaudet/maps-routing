@@ -22,7 +22,7 @@ const { fetchAlternativesMatrix, rankMatrixAlternatives, fetchOsrmRouteAlternati
 const { resolvePlaces } = require('./src/geocode');
 const { debugLog } = require('./src/debug');
 const { buildGoogleMapsRouteUrl } = require('./src/mapsLink');
-const { findHighwayExit } = require('./src/overpass');
+const { findHighwayExit, findNearestRouteIndex } = require('./src/overpass');
 
 /** Cap initial (degrés [0,360)) du point A vers le point B. */
 function bearingDeg(a, b) {
@@ -86,20 +86,25 @@ function isPointInJamCorridor(pt, jamStart, jamEnd, bufferMeters = 200) {
 }
 
 /**
- * Trouve les étapes d'une leg dont le segment est assez proche de la plage
- * congestionnée pour la considérer comme chevauchante. Aucune étape n'expose
- * d'index de polyligne (contrairement à speedReadingIntervals) : le
- * rattachement se fait par proximité géométrique, pas par comparaison d'index.
+ * Trouve les étapes d'une leg dont la plage d'index (le long de la
+ * polyligne décodée de la leg) chevauche celle de la plage congestionnée.
  *
+ * @param {number} indexSlack Tolérance en NOMBRE DE POINTS (pas en mètres)
+ *   pour absorber un arrondi à la frontière d'une étape.
  * @returns {number[]} Index des étapes chevauchantes (peut être vide).
  */
-function findOverlappingStepIndexes(range, steps, toleranceMeters = 250) {
+function findOverlappingStepIndexes(range, steps, points, indexSlack = 2) {
+  if (range.startIndex === undefined || range.endIndex === undefined || !points || points.length === 0) {
+    return [];
+  }
   const overlapping = [];
   steps.forEach((step, index) => {
     if (!step.start || !step.end) return;
-    const distToStart = distancePointToSegment(range.start, step.start, step.end);
-    const distToEnd = distancePointToSegment(range.end, step.start, step.end);
-    if (distToStart <= toleranceMeters || distToEnd <= toleranceMeters) {
+    const stepStartIndex = findNearestRouteIndex(step.start, points).index;
+    const stepEndIndex = findNearestRouteIndex(step.end, points).index;
+    const lo = Math.min(stepStartIndex, stepEndIndex) - indexSlack;
+    const hi = Math.max(stepStartIndex, stepEndIndex) + indexSlack;
+    if (range.startIndex <= hi && range.endIndex >= lo) {
       overlapping.push(index);
     }
   });
@@ -158,9 +163,9 @@ function findHighwaySpan(steps, stepIndex) {
   return { entryIndex, exitIndex };
 }
 
-function classifyJamRange(range, leg) {
+function classifyJamRange(range, leg, options = {}) {
   const steps = leg.steps || [];
-  const overlapping = findOverlappingStepIndexes(range, steps);
+  const overlapping = findOverlappingStepIndexes(range, steps, leg.points || [], options.stepOverlapIndexSlack);
 
   // Bornes du (des) étape(s) que le jam chevauche directement — utilisées
   // à la fois comme itinéraire direct (jam non autoroutier) et comme repli
@@ -211,6 +216,7 @@ function mergeNearbyRanges(ranges, maxGapM) {
     const previous = merged[merged.length - 1];
     if (previous && haversineMeters(previous.end, range.start) <= maxGapM) {
       previous.end = range.end;
+      previous.endIndex = range.endIndex;
       previous.durationSeconds += range.durationSeconds;
       previous.staticDurationSeconds += range.staticDurationSeconds;
     } else {
@@ -244,6 +250,8 @@ function mergeNearbyRanges(ranges, maxGapM) {
  * @param {number} [options.congestionRatio] Seuil de trafic élevé (défaut : 0.25).
  * @param {number} [options.mergeRangeGapMeters] Écart max. (m) pour fusionner
  *   deux plages congestionnées proches avant filtrage (défaut : 500).
+ * @param {number} [options.stepOverlapIndexSlack] Tolérance en nombre de
+ *   points de polyligne pour rattacher une plage congestionnée aux étapes.
  * @param {number} [options.jamLateralOffsetMeters] Décalage latéral (m) pour
  *   trouver le détour perpendiculairement au corridor (défaut : 500).
  * @param {number} [options.jamCorridorBufferMeters] Rayon de sécurité (m)
@@ -392,7 +400,7 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
         // plage parmi les étapes de SA leg (une route peut avoir plusieurs
         // legs si des points intermédiaires sont fournis).
         const classification = range.leg
-          ? classifyJamRange(range, range.leg)
+          ? classifyJamRange(range, range.leg, options)
           : { isHighway: false, spanStartPoint: null, spanEndPoint: null, jamStepStartPoint: null, jamStepEndPoint: null };
 
         let pointBefore = classification.jamStepStartPoint ?? range.start;
