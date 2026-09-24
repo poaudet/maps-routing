@@ -165,7 +165,15 @@ function findHighwaySpan(steps, stepIndex) {
 
 function classifyJamRange(range, leg, options = {}) {
   const steps = leg.steps || [];
-  const overlapping = findOverlappingStepIndexes(range, steps, leg.points || [], options.stepOverlapIndexSlack);
+  const points = leg.points || [];
+  const overlapping = findOverlappingStepIndexes(range, steps, points, options.stepOverlapIndexSlack);
+
+  debugLog('planSegment', options, 'Diagnostic chevauchement étape/jam', {
+    rangeIndexSpan: { startIndex: range.startIndex, endIndex: range.endIndex },
+    overlappingStepIndexes: overlapping,
+    overlappingManeuvers: overlapping.map((i) => steps[i]?.maneuver ?? null),
+    allManeuvers: steps.map((s, i) => `${i}:${s.maneuver}`),
+  });
 
   // Bornes du (des) étape(s) que le jam chevauche directement — utilisées
   // à la fois comme itinéraire direct (jam non autoroutier) et comme repli
