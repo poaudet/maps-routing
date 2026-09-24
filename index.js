@@ -301,6 +301,9 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
     route.durationSeconds < best.durationSeconds ? route : best
   );
   const traffic = detectHighTraffic(fastest, options.congestionRatio);
+  debugLog('planSegment', options, 'Valeurs de vitesse distinctes (route la plus rapide)', {
+  values: [...new Set(fastest.legs.flatMap((l) => l.speedReadingIntervals.map((i) => i.speed)))],
+});
   debugLog('planSegment', options, 'Détection de trafic', {
     description: fastest.description,
     durationSeconds: fastest.durationSeconds,
@@ -353,7 +356,7 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
 
   if (traffic.congested) {
     const mergedRanges = mergeNearbyRanges(
-      findCongestedRanges(fastest, options.congestionRatio),
+      findCongestedRanges(fastest, options.congestionRatio, options),
       options.mergeRangeGapMeters ?? 1000 //500
     );
     const congestedRanges = mergedRanges

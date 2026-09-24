@@ -250,11 +250,15 @@ const CONGESTED_SPEEDS = new Set(['SLOW', 'TRAFFIC_JAM']);
  *
  * @returns {Array<{start, end, durationSeconds, staticDurationSeconds}>}
  */
-function findCongestedRangesFromIntervals(route) {
+function findCongestedRangesFromIntervals(route, options = {}) {
   const ranges = [];
   for (const leg of route.legs || []) {
     const intervals = leg.speedReadingIntervals || [];
     const points = leg.points || [];
+        debugLog('google', options, 'Leg : intervalles vs points décodés (diagnostic)', {
+      intervalCount: intervals.length,
+      pointCount: points.length,
+    });
     if (intervals.length === 0 || points.length === 0) {
       continue;
     }
@@ -301,6 +305,11 @@ function findCongestedRangesFromIntervals(route) {
     }
     flush();
   }
+  debugLog('google', options, 'Plages brutes avant fusion/filtrage', {
+    ranges: ranges.map((r) => ({
+      delaySeconds: Math.round(r.durationSeconds - r.staticDurationSeconds),
+    })),
+  });
   return ranges.filter((range) => range.start && range.end);
 }
 
@@ -309,8 +318,8 @@ function findCongestedRangesFromIntervals(route) {
  * (données natives Google, aucune requête supplémentaire) ; repli sur le
  * ratio global leg-level si les intervals sont indisponibles.
  */
-function findCongestedRanges(route, congestionRatio = DEFAULT_CONGESTION_RATIO) {
-  const intervalRanges = findCongestedRangesFromIntervals(route);
+function findCongestedRanges(route, congestionRatio = DEFAULT_CONGESTION_RATIO, options = {}) {
+  const intervalRanges = findCongestedRangesFromIntervals(route, options);
   if (intervalRanges.length > 0) {
     return intervalRanges.map((range) => ({ ...range, origin: 'intervals' }));
   }
