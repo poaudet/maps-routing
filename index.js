@@ -123,80 +123,57 @@ function isHighwayEntryStep(steps, index) {
   return false;
 }
 
-/** Vrai si l'étape marque une sortie d'autoroute : un RAMP_LEFT/RAMP_RIGHT
- * qui n'est PAS immédiatement suivi d'un MERGE (sinon c'est une bretelle
- * d'échangeur interne à l'autoroute, pas une sortie). */
-function isHighwayExitStep(steps, index) {
-  const step = steps[index];
-  if (!step) return false;
-  if (step.maneuver !== 'RAMP_LEFT' && step.maneuver !== 'RAMP_RIGHT') return false;
-  return steps[index + 1]?.maneuver !== 'MERGE';
+/** Manoeuvres considérées comme "associées à l'autoroute" pour décider si un
+ * jam justifie un appel Overpass. Volontairement large (inclut
+ * STRAIGHT/NAME_CHANGE en plus de RAMP_LEFT/RAMP_RIGHT/MERGE) : la
+ * classification n'a plus besoin d'être précise, seulement de déclencher
+ * l'appel au moins chaque fois que c'est pertinent — Overpass (sortie
+ * signalée ou non) reste le filtre final, pas cette classification. Un faux
+ * positif coûte une requête Overpass vide (repli déjà en place) ; un faux
+ * négatif coûte un détour manqué. */
+const HIGHWAY_MANEUVERS = new Set(['RAMP_LEFT', 'RAMP_RIGHT', 'MERGE', 'STRAIGHT', 'NAME_CHANGE']);
+
+function stepLooksLikeHighway(step) {
+  return Boolean(step && HIGHWAY_MANEUVERS.has(step.maneuver));
 }
 
 /**
- * Cherche la plage autoroutière englobant l'étape `stepIndex` : remonte
- * jusqu'à la première entrée, descend jusqu'à la première sortie. Si l'une
- * des deux recherches n'aboutit pas avant une extrémité de la leg, l'étape
- * n'est pas considérée autoroutière.
- *
- * @returns {{entryIndex: number, exitIndex: number}|null}
+ * Décide si une plage congestionnée justifie une recherche de sortie
+ * Overpass, et fournit les bornes à interroger. Remplace l'ancienne logique
+ * de repérage d'une plage entrée/sortie précise (retirée : trop fragile
+ * face aux séquences d'approche à plusieurs étapes — cf. l'échangeur Grand
+ * Central Pkwy où le jam tombe sur des RAMP avant le MERGE réel, plusieurs
+ * étapes plus loin). La boîte transmise à Overpass est directement les
+ * bornes du jam lui-même : la précision de la zone de recherche est le
+ * travail d'Overpass (searchRadiusMeters), pas de cette classification.
  */
-function findHighwaySpan(steps, stepIndex) {
-  let entryIndex = null;
-  for (let i = stepIndex; i >= 0; i -= 1) {
-    if (isHighwayEntryStep(steps, i)) {
-      entryIndex = i;
-      break;
-    }
-  }
-  if (entryIndex === null) return null;
-
-  let exitIndex = null;
-  for (let i = stepIndex; i < steps.length; i += 1) {
-    if (isHighwayExitStep(steps, i)) {
-      exitIndex = i;
-      break;
-    }
-  }
-  if (exitIndex === null) return null;
-
-  return { entryIndex, exitIndex };
-}
-
 function classifyJamRange(range, leg, options = {}) {
   const steps = leg.steps || [];
   const points = leg.points || [];
   const overlapping = findOverlappingStepIndexes(range, steps, points, options.stepOverlapIndexSlack);
 
-  debugLog('planSegment', options, 'Diagnostic chevauchement étape/jam', {
-    rangeIndexSpan: { startIndex: range.startIndex, endIndex: range.endIndex },
-    overlappingStepIndexes: overlapping,
-    overlappingManeuvers: overlapping.map((i) => steps[i]?.maneuver ?? null),
-    allManeuvers: steps.map((s, i) => `${i}:${s.maneuver}`),
-  });
-
-  // Bornes du (des) étape(s) que le jam chevauche directement — utilisées
-  // à la fois comme itinéraire direct (jam non autoroutier) et comme repli
-  // par côté quand Overpass ne trouve pas de sortie (jam autoroutier).
   const jamStepStartPoint = overlapping.length > 0 ? steps[overlapping[0]]?.start ?? null : null;
   const jamStepEndPoint =
     overlapping.length > 0 ? steps[overlapping[overlapping.length - 1]]?.end ?? null : null;
 
-  for (const stepIndex of overlapping) {
-    const span = findHighwaySpan(steps, stepIndex);
-    if (span) {
-      const paddedEntryIndex = Math.max(0, span.entryIndex - 1);
-      const paddedExitIndex = Math.min(steps.length - 1, span.exitIndex + 1);
-      return {
-        isHighway: true,
-        spanStartPoint: steps[paddedEntryIndex]?.start ?? null,
-        spanEndPoint: steps[paddedExitIndex]?.end ?? null,
-        jamStepStartPoint,
-        jamStepEndPoint,
-      };
-    }
-  }
-  return { isHighway: false, spanStartPoint: null, spanEndPoint: null, jamStepStartPoint, jamStepEndPoint };
+  const neighborBefore = overlapping.length > 0 ? steps[overlapping[0] - 1] : null;
+  const neighborAfter = overlapping.length > 0 ? steps[overlapping[overlapping.length - 1] + 1] : null;
+
+  const isHighway =
+    overlapping.some((i) => stepLooksLikeHighway(steps[i])) ||
+    stepLooksLikeHighway(neighborBefore) ||
+    stepLooksLikeHighway(neighborAfter);
+
+  debugLog('planSegment', options, 'Classification autoroutière du jam', {
+    rangeIndexSpan: { startIndex: range.startIndex, endIndex: range.endIndex },
+    overlappingStepIndexes: overlapping,
+    overlappingManeuvers: overlapping.map((i) => steps[i]?.maneuver ?? null),
+    neighborBeforeManeuver: neighborBefore?.maneuver ?? null,
+    neighborAfterManeuver: neighborAfter?.maneuver ?? null,
+    isHighway,
+  });
+
+  return { isHighway, jamStepStartPoint, jamStepEndPoint };
 }
 
 /**
@@ -411,49 +388,51 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
         // plage parmi les étapes de SA leg (une route peut avoir plusieurs
         // legs si des points intermédiaires sont fournis).
         const classification = range.leg
-          ? classifyJamRange(range, range.leg, options)
-          : { isHighway: false, spanStartPoint: null, spanEndPoint: null, jamStepStartPoint: null, jamStepEndPoint: null };
+        ? classifyJamRange(range, range.leg, options)
+        : { isHighway: false, jamStepStartPoint: null, jamStepEndPoint: null };
 
-        let pointBefore = classification.jamStepStartPoint ?? range.start;
-        let pointAfter = classification.jamStepEndPoint ?? range.end;
-        let usedExitBefore = false;
-        let usedExitAfter = false;
+      let pointBefore = classification.jamStepStartPoint ?? range.start;
+      let pointAfter = classification.jamStepEndPoint ?? range.end;
+      let usedExitBefore = false;
+      let usedExitAfter = false;
 
-        // ---- Recherche de sortie Overpass (Tâche 4), uniquement si
-        // autoroutier. Repli individuel par côté sur la borne d'étape du
-        // jam lui-même si Overpass ne trouve rien de ce côté.
-        if (classification.isHighway) {
-          const [exitBefore, exitAfter] = await Promise.all([
-            classification.spanStartPoint
-              ? findHighwayExit(classification.spanStartPoint, routePoints, 'upstream', options).catch((error) => {
-                debugLog('planSegment', options, 'Recherche de sortie amont échouée (non bloquant)', { error: error.message });
-                return null;
-              })
-              : Promise.resolve(null),
-            classification.spanEndPoint
-              ? findHighwayExit(classification.spanEndPoint, routePoints, 'downstream', options).catch((error) => {
-                debugLog('planSegment', options, 'Recherche de sortie aval échouée (non bloquant)', { error: error.message });
-                return null;
-              })
-              : Promise.resolve(null),
-          ]);
-          if (exitBefore) {
-            pointBefore = { lat: exitBefore.lat, lng: exitBefore.lng };
-            usedExitBefore = true;
-          }
-          if (exitAfter) {
-            pointAfter = { lat: exitAfter.lat, lng: exitAfter.lng };
-            usedExitAfter = true;
-          }
-          debugLog('planSegment', options, 'Plage classée autoroutière', {
-            spanStartPoint: classification.spanStartPoint,
-            spanEndPoint: classification.spanEndPoint,
-            usedExitBefore,
-            usedExitAfter,
-          });
-        } else {
-          debugLog('planSegment', options, 'Plage classée non autoroutière', { pointBefore, pointAfter });
+      // ---- Recherche de sortie Overpass (Tâche 4), uniquement si
+      // autoroutier. Boîte = bornes du jam lui-même, plus de plage
+      // entrée/sortie séparée (retirée, cf. classifyJamRange). Repli
+      // individuel par côté sur la borne d'étape du jam si Overpass ne
+      // trouve rien de ce côté.
+      if (classification.isHighway) {
+        const [exitBefore, exitAfter] = await Promise.all([
+          classification.jamStepStartPoint
+            ? findHighwayExit(classification.jamStepStartPoint, routePoints, 'upstream', options).catch((error) => {
+              debugLog('planSegment', options, 'Recherche de sortie amont échouée (non bloquant)', { error: error.message });
+              return null;
+            })
+            : Promise.resolve(null),
+          classification.jamStepEndPoint
+            ? findHighwayExit(classification.jamStepEndPoint, routePoints, 'downstream', options).catch((error) => {
+              debugLog('planSegment', options, 'Recherche de sortie aval échouée (non bloquant)', { error: error.message });
+              return null;
+            })
+            : Promise.resolve(null),
+        ]);
+        if (exitBefore) {
+          pointBefore = { lat: exitBefore.lat, lng: exitBefore.lng };
+          usedExitBefore = true;
         }
+        if (exitAfter) {
+          pointAfter = { lat: exitAfter.lat, lng: exitAfter.lng };
+          usedExitAfter = true;
+        }
+        debugLog('planSegment', options, 'Plage classée autoroutière', {
+          jamStepStartPoint: classification.jamStepStartPoint,
+          jamStepEndPoint: classification.jamStepEndPoint,
+          usedExitBefore,
+          usedExitAfter,
+        });
+      } else {
+        debugLog('planSegment', options, 'Plage classée non autoroutière', { pointBefore, pointAfter });
+      }
 
         // ---- Primitive point-à-point (Tâche 5), sans modificateur — chemin
         // PRIMAIRE désormais. Ne juge pas la qualité du résultat (repasser
