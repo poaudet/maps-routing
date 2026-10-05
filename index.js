@@ -85,6 +85,59 @@ function isPointInJamCorridor(pt, jamStart, jamEnd, bufferMeters = 200) {
   return distToSegment <= bufferMeters;
 }
 
+/** Distance minimale (m) d'un point à une polyligne, segment par segment
+ * (projection équirectangulaire locale). Remplace, pour filtrer les waypoints
+ * de détour, l'approximation à 3 points d'isPointInJamCorridor : sur un jam de
+ * plusieurs km, celle-ci n'excluait pratiquement rien sur l'autoroute. */
+function distancePointToPolyline(pt, polyPoints) {
+  if (!Array.isArray(polyPoints) || polyPoints.length === 0) return Infinity;
+  if (polyPoints.length === 1) return haversineMeters(pt, polyPoints[0]);
+  const metersPerDegLat = 111320;
+  const metersPerDegLng = 111320 * Math.cos((pt.lat * Math.PI) / 180);
+  const toXY = (p) => ({ x: (p.lng - pt.lng) * metersPerDegLng, y: (p.lat - pt.lat) * metersPerDegLat });
+  let best = Infinity;
+  for (let i = 0; i < polyPoints.length - 1; i += 1) {
+    const a = toXY(polyPoints[i]);
+    const b = toXY(polyPoints[i + 1]);
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const lenSq = dx * dx + dy * dy;
+    const t = lenSq === 0 ? 0 : Math.max(0, Math.min(1, -(a.x * dx + a.y * dy) / lenSq));
+    best = Math.min(best, Math.hypot(a.x + t * dx, a.y + t * dy));
+  }
+  return best;
+}
+
+/** Part (pondérée par la longueur) d'un tracé qui suit encore le tracé du jam. */
+function jamOverlapRatio(routePoints, jamPath, clearanceMeters) {
+  let total = 0;
+  let overlapping = 0;
+  for (let i = 0; i < routePoints.length - 1; i += 1) {
+    const a = routePoints[i];
+    const b = routePoints[i + 1];
+    const len = haversineMeters(a, b);
+    total += len;
+    const mid = { lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 };
+    if (distancePointToPolyline(mid, jamPath) <= clearanceMeters) overlapping += len;
+  }
+  return total > 0 ? overlapping / total : 0;
+}
+
+/** Waypoints = points de manœuvre (début de chaque étape sauf la première,
+ * qui est l'origine), hors du jam, éclaircis uniformément à maxCount. */
+function sampleStepWaypoints(routeLegs, jamPath, clearanceMeters, maxCount) {
+  const candidates = routeLegs
+    .flatMap((leg) => (leg.steps || []).slice(1).map((s) => s.start))
+    .filter(Boolean)
+    .filter((pt) => distancePointToPolyline(pt, jamPath) > clearanceMeters);
+  if (candidates.length <= maxCount) return candidates;
+  const picked = [];
+  for (let i = 0; i < maxCount; i += 1) {
+    picked.push(candidates[Math.floor(((i + 0.5) * candidates.length) / maxCount)]);
+  }
+  return picked;
+}
+
 /**
  * Trouve les étapes d'une leg dont la plage d'index (le long de la
  * polyligne décodée de la leg) chevauche celle de la plage congestionnée.
@@ -383,110 +436,120 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
         let detourAccepted = false;
         const rangeOrder = mergedRanges.indexOf(range);
 
-        // ---- Classification (Tâche 3) : la plage est-elle autoroutière ?
-        // range.leg est attaché par routesApi.js — nécessaire pour situer la
-        // plage parmi les étapes de SA leg (une route peut avoir plusieurs
-        // legs si des points intermédiaires sont fournis).
         const classification = range.leg
-        ? classifyJamRange(range, range.leg, options)
-        : { isHighway: false, jamStepStartPoint: null, jamStepEndPoint: null };
+          ? classifyJamRange(range, range.leg, options)
+          : { isHighway: false, jamStepStartPoint: null, jamStepEndPoint: null };
 
-      let pointBefore = classification.jamStepStartPoint ?? range.start;
-      let pointAfter = classification.jamStepEndPoint ?? range.end;
-      let usedExitBefore = false;
-      let usedExitAfter = false;
+        // Tracé réel du jam (tranche de polyligne), pas la corde start/end.
+        const jamPath =
+          range.leg && range.startIndex !== undefined && range.endIndex !== undefined
+            ? range.leg.points.slice(range.startIndex, range.endIndex + 1)
+            : [range.start, range.end];
+        const clearanceMeters = options.detourWaypointClearanceMeters ?? 60;
+        const maxWaypoints = options.detourMaxWaypoints ?? 4;
+        const maxJamOverlap = options.detourMaxJamOverlapRatio ?? 0.5;
 
-      // ---- Recherche de sortie Overpass (Tâche 4), uniquement si
-      // autoroutier. Boîte = bornes du jam lui-même, plus de plage
-      // entrée/sortie séparée (retirée, cf. classifyJamRange). Repli
-      // individuel par côté sur la borne d'étape du jam si Overpass ne
-      // trouve rien de ce côté.
-      if (classification.isHighway) {
-        const [exitBefore, exitAfter] = await Promise.all([
-          classification.jamStepStartPoint
-            ? findHighwayExit(classification.jamStepStartPoint, routePoints, 'upstream', options).catch((error) => {
-              debugLog('planSegment', options, 'Recherche de sortie amont échouée (non bloquant)', { error: error.message });
-              return null;
-            })
-            : Promise.resolve(null),
-          classification.jamStepEndPoint
-            ? findHighwayExit(classification.jamStepEndPoint, routePoints, 'downstream', options).catch((error) => {
-              debugLog('planSegment', options, 'Recherche de sortie aval échouée (non bloquant)', { error: error.message });
-              return null;
-            })
-            : Promise.resolve(null),
-        ]);
-        if (exitBefore) {
-          pointBefore = { lat: exitBefore.lat, lng: exitBefore.lng };
-          usedExitBefore = true;
+        let pointBefore = classification.jamStepStartPoint ?? range.start;
+        let pointAfter = classification.jamStepEndPoint ?? range.end;
+        let usedExitBefore = false;
+        let usedExitAfter = false;
+
+        if (classification.isHighway) {
+          const [exitBefore, exitAfter] = await Promise.all([
+            classification.jamStepStartPoint
+              ? findHighwayExit(classification.jamStepStartPoint, routePoints, 'upstream', options).catch((error) => {
+                debugLog('planSegment', options, 'Recherche de sortie amont échouée (non bloquant)', { error: error.message });
+                return null;
+              })
+              : Promise.resolve(null),
+            classification.jamStepEndPoint
+              ? findHighwayExit(classification.jamStepEndPoint, routePoints, 'downstream', options).catch((error) => {
+                debugLog('planSegment', options, 'Recherche de sortie aval échouée (non bloquant)', { error: error.message });
+                return null;
+              })
+              : Promise.resolve(null),
+          ]);
+          if (exitBefore) {
+            pointBefore = { lat: exitBefore.lat, lng: exitBefore.lng };
+            usedExitBefore = true;
+          }
+          if (exitAfter) {
+            pointAfter = { lat: exitAfter.lat, lng: exitAfter.lng };
+            usedExitAfter = true;
+          }
+          debugLog('planSegment', options, 'Plage classée autoroutière', {
+            jamStepStartPoint: classification.jamStepStartPoint,
+            jamStepEndPoint: classification.jamStepEndPoint,
+            usedExitBefore,
+            usedExitAfter,
+            exitBeforeId: exitBefore?.id ?? null,
+            exitAfterId: exitAfter?.id ?? null,
+          });
+        } else {
+          debugLog('planSegment', options, 'Plage classée non autoroutière', { pointBefore, pointAfter });
         }
-        if (exitAfter) {
-          pointAfter = { lat: exitAfter.lat, lng: exitAfter.lng };
-          usedExitAfter = true;
-        }
-        debugLog('planSegment', options, 'Plage classée autoroutière', {
-          jamStepStartPoint: classification.jamStepStartPoint,
-          jamStepEndPoint: classification.jamStepEndPoint,
-          usedExitBefore,
-          usedExitAfter,
-        });
-      } else {
-        debugLog('planSegment', options, 'Plage classée non autoroutière', { pointBefore, pointAfter });
-      }
 
-        // ---- Primitive point-à-point (Tâche 5), sans modificateur — chemin
-        // PRIMAIRE désormais. Ne juge pas la qualité du résultat (repasser
-        // par l'autoroute peut être légitime si c'est le trajet le plus
-        // direct entre les deux bornes) — seul un échec de la requête
-        // déclenche le repli ci-dessous.
+        // ---- Chemin primaire : trajet SANS autoroute entre les bornes avant/après
+        // le jam. Google peut ignorer le modificateur quand les bornes sont sur
+        // l'autoroute : on mesure donc si le tracé évite réellement le jam.
         let detour = null;
         if (pointBefore && pointAfter) {
           try {
-            const detourRoutes = await fetchRouteAlternatives(pointBefore, pointAfter, options);
+            const detourRoutes = await fetchRouteAlternatives(pointBefore, pointAfter, {
+              ...options,
+              routeModifiers: { avoidHighways: true },
+            });
             detour = detourRoutes[0] ?? null;
           } catch (error) {
-            debugLog('planSegment', options, 'Primitive point-à-point échouée (non bloquant)', { error: error.message });
+            debugLog('planSegment', options, 'Détour sans autoroute échoué (non bloquant)', { error: error.message });
           }
         }
 
         if (detour) {
-          const detourAnchors = [pointBefore, pointAfter].filter(Boolean);
-          osrmAlternatives.push({
-            source: 'google-detour',
-            viaIndex: null,
-            segmentStart: range.start,
-            segmentEnd: range.end,
-            detourAnchors,
-            detourPolyline: detour.polyline,
-            detourDistanceMeters: detour.distanceMeters,
-            durationSeconds:
-              fastest.durationSeconds - range.durationSeconds + detour.durationSeconds,
-            staticDurationSeconds:
-              (fastest.staticDurationSeconds ?? 0) -
-              (range.staticDurationSeconds ?? 0) +
-              (detour.staticDurationSeconds ?? 0),
-            gainSeconds: range.durationSeconds - detour.durationSeconds,
-            rangeOrder,
-            isHighway: classification.isHighway,
-            usedExitBefore,
-            usedExitAfter,
-          });
-          debugLog('planSegment', options, 'Détour point-à-point accepté', {
-            isHighway: classification.isHighway,
-            usedExitBefore,
-            usedExitAfter,
+          const overlapRatio = jamOverlapRatio(detour.legs.flatMap((l) => l.points), jamPath, clearanceMeters);
+          debugLog('planSegment', options, 'Recouvrement du détour avec le jam', {
+            overlapRatio: Math.round(overlapRatio * 100) / 100,
             description: detour.description,
           });
-          detourAccepted = true;
+          if (overlapRatio <= maxJamOverlap) {
+            const intermediates = sampleStepWaypoints(detour.legs, jamPath, clearanceMeters, maxWaypoints);
+            const detourAnchors = [pointBefore, ...intermediates, pointAfter].filter(Boolean);
+            osrmAlternatives.push({
+              source: 'google-detour',
+              viaIndex: null,
+              segmentStart: range.start,
+              segmentEnd: range.end,
+              detourAnchors,
+              detourPolyline: detour.polyline,
+              detourDistanceMeters: detour.distanceMeters,
+              durationSeconds:
+                fastest.durationSeconds - range.durationSeconds + detour.durationSeconds,
+              staticDurationSeconds:
+                (fastest.staticDurationSeconds ?? 0) -
+                (range.staticDurationSeconds ?? 0) +
+                (detour.staticDurationSeconds ?? 0),
+              gainSeconds: range.durationSeconds - detour.durationSeconds,
+              rangeOrder,
+              isHighway: classification.isHighway,
+              usedExitBefore,
+              usedExitAfter,
+              intermediateCount: intermediates.length,
+            });
+            debugLog('planSegment', options, 'Détour accepté', {
+              isHighway: classification.isHighway,
+              usedExitBefore,
+              usedExitAfter,
+              intermediateCount: intermediates.length,
+            });
+            detourAccepted = true;
+          }
         }
 
-        // ---- Repli (rôle secondaire désormais) : ancienne logique de
-        // décalage perpendiculaire — n'intervient QUE si la primitive
-        // ci-dessus a échoué (aucune route retournée), pas pour un résultat
-        // simplement jugé insatisfaisant.
+        // ---- Repli : décalage perpendiculaire (inchangé), uniquement si le
+        // chemin primaire n'évite pas le jam. Waypoints = points de manœuvre.
         if (!detourAccepted) {
           const jamBearing = bearingDeg(range.start, range.end);
-          const jamOffsetM = options.jamLateralOffsetMeters ?? 1000 //500;
+          const jamOffsetM = options.jamLateralOffsetMeters ?? 1000;
           for (const side of [-90, 90]) {
             const qStart = offsetLatLng(range.start, jamBearing + side, jamOffsetM);
             const qEnd = offsetLatLng(range.end, jamBearing + side, jamOffsetM);
@@ -511,11 +574,7 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
               /autoroute|transcanadienne/i.test(fallbackDetour?.description ?? '') ||
               detourFreeFlowKmh > 80;
             if (fallbackDetour && !detourIsMotorway) {
-              const detourPts = fallbackDetour.legs.flatMap((l) => l.points);
-              const detourAnchors = (options.detourWaypointFractions ?? [0.25, 0.50, 0.75])
-                .map((f) => detourPts[Math.floor(detourPts.length * f)])
-                .filter(Boolean)
-                .filter((pt) => !isPointInJamCorridor(pt, range.start, range.end, options.jamCorridorBufferMeters ?? 200));
+              const detourAnchors = sampleStepWaypoints(fallbackDetour.legs, jamPath, clearanceMeters, maxWaypoints);
               osrmAlternatives.push({
                 source: 'google-detour',
                 viaIndex: null,
@@ -549,35 +608,32 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
             });
           }
         }
-        // ---- Tâche 6 : segment enchaîné "éviter les autoroutes" — toujours
-        // tenté, indépendamment de la classification autoroutière/non et du
-        // succès du détour primaire ci-dessus. Ancré sur les bornes d'étape
-        // du jam LUI-MÊME (jamStepStartPoint/jamStepEndPoint), jamais sur une
-        // sortie Overpass : le but est d'éviter l'autoroute, pas de s'ancrer
-        // dessus. Alimente l'alternative unique google-detour-partial,
-        // construite après la boucle — jamais discard, même en cas d'échec
-        // (valeur de glisser-déposer manuel dans Google Maps).
+
+        // ---- Tâche 6 : segment enchaîné, ancré sur les bornes d'étape du jam.
+        // Sans sortie Overpass, c'est exactement la même requête que le chemin
+        // primaire : on la réutilise (pas de second appel facturé).
         const chainStart = classification.jamStepStartPoint ?? range.start;
         const chainEnd = classification.jamStepEndPoint ?? range.end;
         let chainedSegment = null;
-        if (chainStart && chainEnd) {
+        if (detour && !usedExitBefore && !usedExitAfter) {
+          chainedSegment = detour;
+        } else if (chainStart && chainEnd) {
           try {
             const chainedRoutes = await fetchRouteAlternatives(chainStart, chainEnd, {
               ...options,
               routeModifiers: { avoidHighways: true },
             });
             chainedSegment = chainedRoutes[0] ?? null;
-            debugLog('planSegment', options, 'Segment enchaîné (sans autoroute) obtenu', {
-              rangeOrder,
-              description: chainedSegment?.description,
-            });
           } catch (error) {
-            debugLog('planSegment', options, 'Segment enchaîné (sans autoroute) échoué (non bloquant)', {
+            debugLog('planSegment', options, 'Segment enchaîné échoué (non bloquant)', {
               rangeOrder,
               error: error.message,
             });
           }
         }
+        const chainedSkipsJam = chainedSegment
+          ? jamOverlapRatio(chainedSegment.legs.flatMap((l) => l.points), jamPath, clearanceMeters) <= maxJamOverlap
+          : false;
         chainedSegments.push({
           rangeOrder,
           segmentStart: range.start,
@@ -585,10 +641,15 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
           rangeDurationSeconds: range.durationSeconds,
           chainStart,
           chainEnd,
+          intermediates: chainedSegment
+            ? sampleStepWaypoints(chainedSegment.legs, jamPath, clearanceMeters, maxWaypoints)
+            : [],
           segment: chainedSegment,
+          skipsJam: chainedSkipsJam,
         });
+
         if (detourAccepted) {
-          continue; // Détour trouvé (primitive ou repli) : pas de matrice OSRM pour ce tronçon.
+          continue;
         }
       }
       const waypoints = hasCongestedRanges
@@ -632,7 +693,7 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
     if (acceptedDetours.length >= 2) {
       const totalGainSeconds = acceptedDetours.reduce((sum, d) => sum + d.gainSeconds, 0);
       const combinedStepAnchors = acceptedDetours
-        .flatMap((d) => [d.segmentStart, ...d.detourAnchors, d.segmentEnd])
+        .flatMap((d) => (d.viaFallback ? [d.segmentStart, ...d.detourAnchors, d.segmentEnd] : d.detourAnchors))
         .filter(Boolean);
       osrmAlternatives.push({
         source: 'google-detour-combined',
@@ -654,14 +715,14 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
     // Google Maps (décision explicite : jamais de discard silencieux).
     if (hasCongestedRanges) {
       const orderedChainedSegments = [...chainedSegments].sort((a, b) => a.rangeOrder - b.rangeOrder);
-      const succeededCount = orderedChainedSegments.filter((s) => s.segment).length;
+      const succeededCount = orderedChainedSegments.filter((s) => s.segment && s.skipsJam).length;
       const totalCount = orderedChainedSegments.length;
       const totalGainSeconds = orderedChainedSegments.reduce((sum, s) => {
-        if (!s.segment) return sum;
+        if (!s.segment || !s.skipsJam) return sum;
         return sum + (s.rangeDurationSeconds - s.segment.durationSeconds);
       }, 0);
       const chainedStepAnchors = orderedChainedSegments
-        .flatMap((s) => [s.chainStart, s.chainEnd])
+        .flatMap((s) => [s.chainStart, ...s.intermediates, s.chainEnd])
         .filter(Boolean);
       const description = succeededCount === totalCount
         ? `Détour enchaîné sans autoroute pour ${succeededCount} tronçon(s) congestionné(s)`
@@ -704,7 +765,7 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
           };
         }
         if (alt.source === 'google-detour') {
-          const description = alt.viaFallback
+          const baseDescription = alt.viaFallback
             ? (alt.detourAnchors.length > 0
               ? 'Détour sans autoroute pour le tronçon congestionné (repli, décalage perpendiculaire)'
               : 'Détour sans autoroute (route libre, pas de waypoint)')
@@ -713,6 +774,10 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
                 ? 'Détour via sortie autoroutière signalée'
                 : 'Détour autoroutier (bornes d\u2019étape, aucune sortie Overpass trouvée)')
               : 'Détour direct pour le tronçon congestionné (hors autoroute)';
+          const description =
+            !alt.viaFallback && alt.intermediateCount === 0
+              ? `${baseDescription} — aucun point de passage hors du bouchon : l\u2019itinéraire suit probablement le bouchon`
+              : baseDescription;
           return {
             index: pool.length,
             description,
@@ -720,7 +785,9 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
             staticDurationSeconds: alt.staticDurationSeconds,
             distanceMeters: alt.detourDistanceMeters ?? null,
             polyline: alt.detourPolyline,
-            stepAnchors: [alt.segmentStart, ...alt.detourAnchors, alt.segmentEnd].filter(Boolean),
+            stepAnchors: alt.viaFallback
+              ? [alt.segmentStart, ...alt.detourAnchors, alt.segmentEnd].filter(Boolean)
+              : alt.detourAnchors.filter(Boolean),
             source: 'google-detour',
             gainSeconds: alt.gainSeconds,
           };
