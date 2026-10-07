@@ -75,67 +75,47 @@ function distancePointToSegment(pt, segStart, segEnd) {
   );
 }
 
-/**
- * Vrai si le point tombe à l'intérieur du corridor du bouchon
- * (segment de range.start à range.end + buffer latéral).
- * Exclut les waypoints qui risqueraient de ramener la route vers le bouchon.
- */
-function isPointInJamCorridor(pt, jamStart, jamEnd, bufferMeters = 200) {
-  const distToSegment = distancePointToSegment(pt, jamStart, jamEnd);
-  return distToSegment <= bufferMeters;
-}
-
-/** Distance minimale (m) d'un point à une polyligne, segment par segment
- * (projection équirectangulaire locale). Remplace, pour filtrer les waypoints
- * de détour, l'approximation à 3 points d'isPointInJamCorridor : sur un jam de
- * plusieurs km, celle-ci n'excluait pratiquement rien sur l'autoroute. */
-function distancePointToPolyline(pt, polyPoints) {
-  if (!Array.isArray(polyPoints) || polyPoints.length === 0) return Infinity;
-  if (polyPoints.length === 1) return haversineMeters(pt, polyPoints[0]);
-  const metersPerDegLat = 111320;
-  const metersPerDegLng = 111320 * Math.cos((pt.lat * Math.PI) / 180);
-  const toXY = (p) => ({ x: (p.lng - pt.lng) * metersPerDegLng, y: (p.lat - pt.lat) * metersPerDegLat });
-  let best = Infinity;
-  for (let i = 0; i < polyPoints.length - 1; i += 1) {
-    const a = toXY(polyPoints[i]);
-    const b = toXY(polyPoints[i + 1]);
-    const dx = b.x - a.x;
-    const dy = b.y - a.y;
-    const lenSq = dx * dx + dy * dy;
-    const t = lenSq === 0 ? 0 : Math.max(0, Math.min(1, -(a.x * dx + a.y * dy) / lenSq));
-    best = Math.min(best, Math.hypot(a.x + t * dx, a.y + t * dy));
+/** Waypoints répartis sur la section du détour qui longe le jam, entre son point
+ * le plus proche du début du jam et celui le plus proche de sa fin. Ignore les
+ * boucles avant/après. Points tirés de la polyligne du détour : exactement sur sa
+ * chaussée, et placés où l'on veut même si une seule étape longe tout le jam. */
+function sampleBypassWaypoints(detourPoints, jamPath, maxCount) {
+  if (!Array.isArray(detourPoints) || detourPoints.length < 2 || jamPath.length === 0 || maxCount <= 0) {
+    return [];
   }
-  return best;
-}
+  const nearestIndex = (target) => {
+    let best = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < detourPoints.length; i += 1) {
+      const d = haversineMeters(target, detourPoints[i]);
+      if (d < bestDist) {
+        bestDist = d;
+        best = i;
+      }
+    }
+    return best;
+  };
+  const a = nearestIndex(jamPath[0]);
+  const b = nearestIndex(jamPath[jamPath.length - 1]);
+  const lo = Math.min(a, b);
+  const hi = Math.max(a, b);
+  if (hi <= lo) return [];
 
-/** Part (pondérée par la longueur) d'un tracé qui suit encore le tracé du jam. */
-function jamOverlapRatio(routePoints, jamPath, clearanceMeters) {
-  let total = 0;
-  let overlapping = 0;
-  for (let i = 0; i < routePoints.length - 1; i += 1) {
-    const a = routePoints[i];
-    const b = routePoints[i + 1];
-    const len = haversineMeters(a, b);
-    total += len;
-    const mid = { lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 };
-    if (distancePointToPolyline(mid, jamPath) <= clearanceMeters) overlapping += len;
+  const cumulative = [0];
+  for (let i = lo + 1; i <= hi; i += 1) {
+    cumulative.push(cumulative[cumulative.length - 1] + haversineMeters(detourPoints[i - 1], detourPoints[i]));
   }
-  return total > 0 ? overlapping / total : 0;
-}
+  const total = cumulative[cumulative.length - 1];
+  if (total === 0) return [];
 
-/** Waypoints = points de manœuvre (début de chaque étape sauf la première,
- * qui est l'origine), hors du jam, éclaircis uniformément à maxCount. */
-function sampleStepWaypoints(routeLegs, jamPath, clearanceMeters, maxCount) {
-  const candidates = routeLegs
-    .flatMap((leg) => (leg.steps || []).slice(1).map((s) => s.start))
-    .filter(Boolean)
-    .filter((pt) => distancePointToPolyline(pt, jamPath) > clearanceMeters);
-  if (candidates.length <= maxCount) return candidates;
-  const picked = [];
-  for (let i = 0; i < maxCount; i += 1) {
-    picked.push(candidates[Math.floor(((i + 0.5) * candidates.length) / maxCount)]);
+  const indexes = new Set();
+  let cursor = 0;
+  for (let k = 1; k <= maxCount; k += 1) {
+    const target = (total * k) / (maxCount + 1);
+    while (cursor < cumulative.length - 1 && cumulative[cursor] < target) cursor += 1;
+    indexes.add(lo + cursor);
   }
-  return picked;
+  return [...indexes].sort((x, y) => x - y).map((i) => detourPoints[i]);
 }
 
 /**
@@ -445,9 +425,7 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
           range.leg && range.startIndex !== undefined && range.endIndex !== undefined
             ? range.leg.points.slice(range.startIndex, range.endIndex + 1)
             : [range.start, range.end];
-        const clearanceMeters = options.detourWaypointClearanceMeters ?? 60;
         const maxWaypoints = options.detourMaxWaypoints ?? 4;
-        const maxJamOverlap = options.detourMaxJamOverlapRatio ?? 0.5;
 
         let pointBefore = classification.jamStepStartPoint ?? range.start;
         let pointAfter = classification.jamStepEndPoint ?? range.end;
@@ -506,13 +484,17 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
         }
 
         if (detour) {
-          const overlapRatio = jamOverlapRatio(detour.legs.flatMap((l) => l.points), jamPath, clearanceMeters);
-          debugLog('planSegment', options, 'Recouvrement du détour avec le jam', {
-            overlapRatio: Math.round(overlapRatio * 100) / 100,
+          const detourDelaySeconds = detour.durationSeconds - detour.staticDurationSeconds;
+          debugLog('planSegment', options, 'Délai propre du détour', {
+            detourDelaySeconds: Math.round(detourDelaySeconds),
             description: detour.description,
           });
-          if (overlapRatio <= maxJamOverlap) {
-            const intermediates = sampleStepWaypoints(detour.legs, jamPath, clearanceMeters, maxWaypoints);
+          if (detourDelaySeconds < (options.minDelaySeconds ?? 60)) {
+            const intermediates = sampleBypassWaypoints(
+              detour.legs.flatMap((l) => l.points),
+              jamPath,
+              maxWaypoints
+            );
             const detourAnchors = [pointBefore, ...intermediates, pointAfter].filter(Boolean);
             osrmAlternatives.push({
               source: 'google-detour',
@@ -574,7 +556,11 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
               /autoroute|transcanadienne/i.test(fallbackDetour?.description ?? '') ||
               detourFreeFlowKmh > 80;
             if (fallbackDetour && !detourIsMotorway) {
-              const detourAnchors = sampleStepWaypoints(fallbackDetour.legs, jamPath, clearanceMeters, maxWaypoints);
+              const detourAnchors = sampleBypassWaypoints(
+                fallbackDetour.legs.flatMap((l) => l.points),
+                jamPath,
+                maxWaypoints
+              );
               osrmAlternatives.push({
                 source: 'google-detour',
                 viaIndex: null,
@@ -632,7 +618,7 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
           }
         }
         const chainedSkipsJam = chainedSegment
-          ? jamOverlapRatio(chainedSegment.legs.flatMap((l) => l.points), jamPath, clearanceMeters) <= maxJamOverlap
+          ? chainedSegment.durationSeconds - chainedSegment.staticDurationSeconds < (options.minDelaySeconds ?? 60)
           : false;
         chainedSegments.push({
           rangeOrder,
@@ -642,7 +628,7 @@ async function planSegment(pointAInput, pointBInput, options = {}) {
           chainStart,
           chainEnd,
           intermediates: chainedSegment
-            ? sampleStepWaypoints(chainedSegment.legs, jamPath, clearanceMeters, maxWaypoints)
+            ? sampleBypassWaypoints(chainedSegment.legs.flatMap((l) => l.points), jamPath, maxWaypoints)
             : [],
           segment: chainedSegment,
           skipsJam: chainedSkipsJam,
